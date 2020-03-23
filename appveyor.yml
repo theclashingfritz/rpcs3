@@ -133,7 +133,7 @@ deploy:
     tag: build-$(APPVEYOR_REPO_COMMIT)
     release: $(AVVER)
     artifact: $(BUILD)
-    repository: RPCS3/rpcs3-binaries-win
+    repository: theclashingfritz/rpcs3-binaries-win
     draft: false
     prerelease: false
     force_update: true
@@ -141,7 +141,7 @@ deploy:
         secure: gTZqN6J9QNQTv9vu2qtExWk1x4o9dSfyTH/y86Yhe3qu+2w6Mly1MaDFMaXgrN1e
     on:
         branch: master
-        appveyor_repo_name: RPCS3/rpcs3
+        appveyor_repo_name: theclashingfritz/rpcs3
 
 on_success:
 - ps: | # update appveyor build version, done last to prevent webhook breakage
