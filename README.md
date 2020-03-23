@@ -2,7 +2,7 @@ RPCS3
 =====
 
 [![Build Status](https://travis-ci.org/theclashingfritz/rpcs3.svg?branch=master)](https://travis-ci.org/theclashingfritz/rpcs3)
-[![Build status](https://ci.appveyor.com/api/projects/status/411c4clmiohtx7eo/branch/master?svg=true)](https://ci.appveyor.com/project/theclashingfritz/rpcs3/branch/master)
+[![Build status](https://ci.appveyor.com/api/projects/status/jiqyymwlb4xx7h57?svg=true)](https://ci.appveyor.com/project/theclashingfritz/rpcs3/branch/master)
 
 The world's first free and open-source PlayStation 3 emulator/debugger, written in C++ for Windows and Linux.
 
