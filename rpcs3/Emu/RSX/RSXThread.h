@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <queue>
 #include <deque>
 #include <variant>
 #include <stack>
@@ -588,7 +589,9 @@ namespace rsx
 		backend_configuration backend_config{};
 
 		// FIFO
+	public:
 		std::unique_ptr<FIFO::FIFO_control> fifo_ctrl;
+	protected:
 		FIFO::flattening_helper m_flattener;
 		u32 fifo_ret_addr = RSX_CALL_STACK_EMPTY;
 		u32 saved_fifo_ret = RSX_CALL_STACK_EMPTY;
@@ -708,6 +711,8 @@ namespace rsx
 		 * returns whether surface is a render target and surface pitch in native format
 		 */
 		void get_current_fragment_program(const std::array<std::unique_ptr<rsx::sampled_image_descriptor_base>, rsx::limits::fragment_textures_count>& sampler_descriptors);
+	public:
+		bool invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size);
 
 	public:
 		u64 target_rsx_flip_time = 0;
@@ -720,9 +725,16 @@ namespace rsx
 		bool capture_current_frame = false;
 
 	public:
-		bool invalid_command_interrupt_raised = false;
-		bool sync_point_request = false;
+		atomic_t<bool> sync_point_request = false;
 		bool in_begin_end = false;
+
+		struct desync_fifo_cmd_info
+		{
+			u32 cmd;
+			u64 timestamp;
+		};
+
+		std::queue<desync_fifo_cmd_info> recovered_fifo_cmds_history;
 
 		atomic_t<s32> async_tasks_pending{ 0 };
 

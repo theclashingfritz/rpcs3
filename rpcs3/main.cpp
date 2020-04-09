@@ -6,14 +6,12 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QFileInfo>
-#include <QLayout>
 #include <QTimer>
 #include <QObject>
-#include <QMessageBox>
-#include <QTextDocument>
 #include <QStyleFactory>
 
 #include "rpcs3qt/gui_application.h"
+#include "rpcs3qt/fatal_error_dialog.h"
 
 #include "headless_application.h"
 #include "Utilities/sema.h"
@@ -26,6 +24,8 @@ DYNAMIC_IMPORT("ntdll.dll", NtSetTimerResolution, NTSTATUS(ULONG DesiredResoluti
 #include <unistd.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <stdlib.h>
+#include <limits.h>
 #endif
 
 #ifdef __linux__
@@ -46,12 +46,6 @@ DYNAMIC_IMPORT("ntdll.dll", NtSetTimerResolution, NTSTATUS(ULONG DesiredResoluti
 
 inline std::string sstr(const QString& _in) { return _in.toStdString(); }
 
-template <typename... Args>
-inline auto tr(Args&&... args)
-{
-	return QObject::tr(std::forward<Args>(args)...);
-}
-
 static semaphore<> s_qt_init;
 
 static atomic_t<char*> s_argv0;
@@ -59,6 +53,8 @@ static atomic_t<char*> s_argv0;
 #ifndef _WIN32
 extern char **environ;
 #endif
+
+LOG_CHANNEL(sys_log, "SYS");
 
 [[noreturn]] extern void report_fatal_error(const std::string& text)
 {
@@ -81,23 +77,8 @@ extern char **environ;
 
 	auto show_report = [](const std::string& text)
 	{
-		QMessageBox msg;
-		msg.setWindowTitle(tr("RPCS3: Fatal Error"));
-		msg.setIcon(QMessageBox::Critical);
-		msg.setTextFormat(Qt::RichText);
-		msg.setText(QString(R"(
-			<p style="white-space: nowrap;">
-				%1<br>
-				%2<br>
-				<a href='https://github.com/RPCS3/rpcs3/wiki/How-to-ask-for-Support'>https://github.com/RPCS3/rpcs3/wiki/How-to-ask-for-Support</a><br>
-				%3<br>
-			</p>
-			)")
-			.arg(Qt::convertFromPlainText(QString::fromStdString(text)))
-			.arg(tr("HOW TO REPORT ERRORS:"))
-			.arg(tr("Please, don't send incorrect reports. Thanks for understanding.")));
-		msg.layout()->setSizeConstraint(QLayout::SetFixedSize);
-		msg.exec();
+		fatal_error_dialog dlg(text);
+		dlg.exec();
 	};
 
 #ifdef __APPLE__
@@ -127,9 +108,24 @@ extern char **environ;
 #else
 			pid_t pid;
 			std::vector<char> data(text.data(), text.data() + text.size() + 1);
+			std::string run_arg = +s_argv0;
 			std::string err_arg = "--error";
-			char* argv[] = {+s_argv0, err_arg.data(), data.data(), nullptr};
-			int ret = posix_spawn(&pid, +s_argv0, nullptr, nullptr, argv, environ);
+
+			if (run_arg.find_first_of('/') == umax)
+			{
+				// AppImage has "rpcs3" in argv[0], can't just execute it
+#ifdef __linux__
+				char buffer[PATH_MAX]{};
+				if (::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1) > 0)
+				{
+					printf("Found exec link: %s\n", buffer);
+					run_arg = buffer;
+				}
+#endif
+			}
+
+			char* argv[] = {run_arg.data(), err_arg.data(), data.data(), nullptr};
+			int ret = posix_spawn(&pid, run_arg.c_str(), nullptr, nullptr, argv, environ);
 
 			if (ret == 0)
 			{
@@ -170,6 +166,7 @@ const char* arg_styles     = "styles";
 const char* arg_style      = "style";
 const char* arg_stylesheet = "stylesheet";
 const char* arg_error      = "error";
+const char* arg_updating   = "updating";
 
 int find_arg(std::string arg, int& argc, char* argv[])
 {
@@ -263,6 +260,15 @@ QCoreApplication* createApplication(int& argc, char* argv[])
 
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+	ULONG64 intro_cycles{};
+	QueryThreadCycleTime(GetCurrentThread(), &intro_cycles);
+#elif defined(RUSAGE_THREAD)
+	struct ::rusage intro_stats{};
+	::getrusage(RUSAGE_THREAD, &intro_stats);
+	const u64 intro_time = (intro_stats.ru_utime.tv_sec + intro_stats.ru_stime.tv_sec) * 1000000000ull + (intro_stats.ru_utime.tv_usec + intro_stats.ru_stime.tv_usec) * 1000ull;
+#endif
+
 	s_argv0 = argv[0]; // Save for report_fatal_error
 
 	// Only run RPCS3 to display an error
@@ -284,9 +290,13 @@ int main(int argc, char** argv)
 
 	fs::file instance_lock;
 
-	for (u32 num = 0; num < 100 && !instance_lock.open(lock_name, fs::rewrite + fs::lock); num++)
+	// True if an argument --updating found
+	const bool is_updating = find_arg(arg_updating, argc, argv) != 0;
+
+	// Keep trying to lock the file for ~2s normally, and for ~10s in the case of --updating
+	for (u32 num = 0; num < (is_updating ? 500u : 100u) && !instance_lock.open(lock_name, fs::rewrite + fs::lock); num++)
 	{
-		std::this_thread::sleep_for(30ms);
+		std::this_thread::sleep_for(20ms);
 	}
 
 	if (!instance_lock)
@@ -354,6 +364,12 @@ int main(int argc, char** argv)
 		logs::set_init({std::move(ver), std::move(os)});
 	}
 
+#ifdef _WIN32
+	sys_log.notice("Initialization times before main(): %fGc", intro_cycles / 1000000000.);
+#elif defined(RUSAGE_THREAD)
+	sys_log.notice("Initialization times before main(): %fs", intro_time / 1000000000.);
+#endif
+
 #ifdef __linux__
 	struct ::rlimit rlim;
 	rlim.rlim_cur = 4096;
@@ -390,6 +406,7 @@ int main(int argc, char** argv)
 	parser.addOption(QCommandLineOption(arg_styles, "Lists the available styles."));
 	parser.addOption(QCommandLineOption(arg_style, "Loads a custom style.", "style", ""));
 	parser.addOption(QCommandLineOption(arg_stylesheet, "Loads a custom stylesheet.", "path", ""));
+	parser.addOption(QCommandLineOption(arg_updating, "For internal usage."));
 	parser.process(app->arguments());
 
 	// Don't start up the full rpcs3 gui if we just want the version or help.

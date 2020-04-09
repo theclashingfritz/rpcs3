@@ -6,28 +6,10 @@
 #include "rsx_decode.h"
 #include "Emu/Cell/PPUCallback.h"
 #include "Emu/Cell/lv2/sys_rsx.h"
+#include "Emu/RSX/Common/BufferUtils.h"
 
 #include <thread>
 #include <atomic>
-
-template <>
-void fmt_class_string<frame_limit_type>::format(std::string& out, u64 arg)
-{
-	format_enum(out, arg, [](frame_limit_type value)
-	{
-		switch (value)
-		{
-		case frame_limit_type::none: return "Off";
-		case frame_limit_type::_59_94: return "59.94";
-		case frame_limit_type::_50: return "50";
-		case frame_limit_type::_60: return "60";
-		case frame_limit_type::_30: return "30";
-		case frame_limit_type::_auto: return "Auto";
-		}
-
-		return unknown;
-	});
-}
 
 namespace rsx
 {
@@ -42,7 +24,7 @@ namespace rsx
 		const u32 cmd = rsx->get_fifo_cmd();
 		rsx_log.error("Invalid RSX method 0x%x (arg=0x%x, start=0x%x, count=0x%x, non-inc=%s)", _reg << 2, arg,
 		cmd & 0xfffc, (cmd >> 18) & 0x7ff, !!(cmd & RSX_METHOD_NON_INCREMENT_CMD));
-		rsx->invalid_command_interrupt_raised = true;
+		rsx->recover_fifo();
 	}
 
 	void trace_method(thread* rsx, u32 _reg, u32 arg)
@@ -68,7 +50,7 @@ namespace rsx
 
 		void semaphore_acquire(thread* rsx, u32 /*_reg*/, u32 arg)
 		{
-			rsx->sync_point_request = true;
+			rsx->sync_point_request.release(true);
 			const u32 addr = get_address(method_registers.semaphore_offset_406e(), method_registers.semaphore_context_dma_406e(), HERE);
 
 			const auto& sema = vm::_ref<atomic_be_t<u32>>(addr);
@@ -150,7 +132,7 @@ namespace rsx
 			if (const bool is_flip_sema = (offset == 0x10 && ctxt == CELL_GCM_CONTEXT_DMA_SEMAPHORE_R);
 				!is_flip_sema)
 			{
-				rsx->sync_point_request = true;
+				rsx->sync_point_request.release(true);
 			}
 
 			const u32 addr = get_address(offset, ctxt, HERE);
@@ -421,46 +403,74 @@ namespace rsx
 		template<u32 index>
 		struct set_transform_constant
 		{
-			static void impl(thread* rsxthr, u32 _reg, u32 arg)
+			static void impl(thread* rsx, u32 /*_reg*/, u32 /*arg*/)
 			{
 				static constexpr u32 reg = index / 4;
 				static constexpr u8 subreg = index % 4;
 
+				// Get real args count
+				const u32 count = std::min<u32>({rsx->fifo_ctrl->get_remaining_args_count() + 1,
+					static_cast<u32>(((rsx->ctrl->put & ~3ull) - (rsx->fifo_ctrl->get_pos() - 4)) / 4), 32 - index});
+
 				const u32 load = rsx::method_registers.transform_constant_load();
-				const u32 address = load + reg;
-				if (address >= 468)
+
+				u32 rcount = count;
+				if (const u32 max = (load + reg) * 4 + count + subreg; max > 468 * 4)
 				{
 					// Ignore addresses outside the usable [0, 467] range
-					rsx_log.warning("Invalid transform register index (load=%d, index=%d)", load, index);
-					return;
+					rsx_log.warning("Invalid transform register index (load=%u, index=%u, count=%u)", load, index, count);
+					rcount -= max - (468 * 4);
 				}
 
-				auto &value = rsx::method_registers.transform_constants[load + reg][subreg];
-				if (value != arg)
+				const auto values = &rsx::method_registers.transform_constants[load + reg][subreg];
+
+				if (rsx->m_graphics_state & rsx::pipeline_state::transform_constants_dirty)
 				{
-					//Transform constants invalidation is expensive (~8k bytes per update)
-					value = arg;
-					rsxthr->m_graphics_state |= rsx::pipeline_state::transform_constants_dirty;
+					// Minor optimization: don't compare values if we already know we need invalidation
+					stream_data_to_memory_swapped_u32<true>(values, vm::base(rsx->fifo_ctrl->get_current_arg_ptr()), rcount, 4);
 				}
+				else
+				{
+					if (stream_data_to_memory_swapped_and_compare_u32<true>(values, vm::base(rsx->fifo_ctrl->get_current_arg_ptr()), rcount * 4))
+					{
+						// Transform constants invalidation is expensive (~8k bytes per update)
+						rsx->m_graphics_state |= rsx::pipeline_state::transform_constants_dirty;
+					}
+				}
+
+				rsx->fifo_ctrl->skip_methods(count - 1);
 			}
 		};
 
 		template<u32 index>
 		struct set_transform_program
 		{
-			static void impl(thread* rsx, u32 _reg, u32 arg)
+			static void impl(thread* rsx, u32 /*_reg*/, u32 /*arg*/)
 			{
-				if (rsx::method_registers.transform_program_load() >= 512)
+				// Get real args count
+				const u32 count = std::min<u32>({rsx->fifo_ctrl->get_remaining_args_count() + 1,
+					static_cast<u32>(((rsx->ctrl->put & ~3ull) - (rsx->fifo_ctrl->get_pos() - 4)) / 4), 32 - index});
+
+				const u32 load_pos = rsx::method_registers.transform_program_load();
+
+				u32 rcount = count;
+
+				if (const u32 max = load_pos * 4 + rcount + (index % 4);
+					max > 512 * 4)
 				{
 					// PS3 seems to allow exceeding the program buffer by upto 32 instructions before crashing
 					// Discard the "excess" instructions to not overflow our transform program buffer
 					// TODO: Check if the instructions in the overflow area are executed by PS3
 					rsx_log.warning("Program buffer overflow!");
-					return;
+					rcount -= max - (512 * 4);
 				}
 
-				method_registers.commit_4_transform_program_instructions(index);
+				stream_data_to_memory_swapped_u32<true>(&rsx::method_registers.transform_program[load_pos * 4 + index % 4]
+					, vm::base(rsx->fifo_ctrl->get_current_arg_ptr()), rcount, 4);
+
 				rsx->m_graphics_state |= rsx::pipeline_state::vertex_program_dirty;
+				rsx::method_registers.transform_program_load_set(load_pos + ((rcount + index % 4) / 4));
+				rsx->fifo_ctrl->skip_methods(count - 1);
 			}
 		};
 
@@ -527,7 +537,7 @@ namespace rsx
 				if (rsx::method_registers.current_draw_clause.primitive == rsx::primitive_type::invalid)
 				{
 					// Recover from invalid primitive only if draw clause is not empty
-					rsxthr->invalid_command_interrupt_raised = true;
+					rsxthr->recover_fifo();
 
 					rsx_log.error("NV4097_SET_BEGIN_END aborted due to invalid primitive!");
 					return;
@@ -741,7 +751,7 @@ namespace rsx
 			{
 				// Ignore invalid value, recover
 				method_registers.registers[reg] = method_registers.register_previous_value;
-				rsx->invalid_command_interrupt_raised = true;
+				rsx->recover_fifo();
 
 				rsx_log.error("Invalid NV4097_SET_INDEX_ARRAY_DMA value: 0x%x", arg);
 			}
@@ -819,65 +829,113 @@ namespace rsx
 		template<u32 index>
 		struct color
 		{
-			static void impl(thread* rsx, u32 _reg, u32 arg)
+			static void impl(thread* rsx, u32 /*_reg*/, u32 /*arg*/)
 			{
-				if (index >= method_registers.nv308a_size_out_x())
+				const u32 out_x_max = method_registers.nv308a_size_out_x();
+
+				if (index >= out_x_max)
 				{
 					// Skip
 					return;
 				}
 
-				u32 color = arg;
-				u32 write_len = 4;
+				// Get position of the current command arg
+				const u32 src_offset = rsx->fifo_ctrl->get_pos() - 4;
+
+				// Get real args count (starting from NV3089_COLOR)
+				const u32 count = std::min<u32>({rsx->fifo_ctrl->get_remaining_args_count() + 1,
+					static_cast<u32>(((rsx->ctrl->put & ~3ull) - src_offset) / 4), 0x700 - index, out_x_max - index});
+
+				const u32 dst_dma = method_registers.blit_engine_output_location_nv3062();
+				const u32 dst_offset = method_registers.blit_engine_output_offset_nv3062();
+				const u32 out_pitch = method_registers.blit_engine_output_pitch_nv3062();
+
+				const u32 x = method_registers.nv308a_x() + index;
+				const u32 y = method_registers.nv308a_y();
+
+				// TODO
+				//auto res = vm::passive_lock(address, address + write_len);
+
 				switch (method_registers.blit_engine_nv3062_color_format())
 				{
 				case blit_engine::transfer_destination_format::a8r8g8b8:
 				case blit_engine::transfer_destination_format::y32:
 				{
-					// Bit cast
+					// Bit cast - optimize to mem copy
+
+					const auto dst = vm::_ptr<u8>(get_address(dst_offset + (x * 4) + (out_pitch * y), dst_dma, HERE));
+					const auto src = vm::_ptr<const u8>(get_address(src_offset, CELL_GCM_LOCATION_MAIN, HERE));
+
+					const u32 data_length = count * 4;
+
+					if (rsx->fifo_ctrl->last_cmd() & RSX_METHOD_NON_INCREMENT_CMD_MASK) [[unlikely]]
+					{
+						// Move last 32 bits
+						reinterpret_cast<u32*>(dst)[0] = reinterpret_cast<const u32*>(src)[count - 1];
+						rsx->invalidate_fragment_program(dst_dma, dst_offset, 4);
+					}
+					else
+					{
+						if (dst_dma & CELL_GCM_LOCATION_MAIN)
+						{
+							// May overlap
+							std::memmove(dst, src, data_length);
+						}
+						else
+						{
+							// Never overlaps
+							std::memcpy(dst, src, data_length);
+						}
+
+						rsx->invalidate_fragment_program(dst_dma, dst_offset, count * 4);
+					}
+
 					break;
 				}
 				case blit_engine::transfer_destination_format::r5g6b5:
 				{
-					// Input is considered to be ARGB8
-					u32 r = (arg >> 16) & 0xFF;
-					u32 g = (arg >> 8) & 0xFF;
-					u32 b = arg & 0xFF;
+					const auto dst = vm::_ptr<u16>(get_address(dst_offset + (x * 2) + (y * out_pitch), dst_dma, HERE));
+					const auto src = vm::_ptr<const u32>(get_address(src_offset, CELL_GCM_LOCATION_MAIN, HERE));
 
-					r = u32(r * 32 / 255.f);
-					g = u32(g * 64 / 255.f);
-					b = u32(b * 32 / 255.f);
-					color = (r << 11) | (g << 5) | b;
-					write_len = 2;
+					auto convert = [](u32 input) -> u16
+					{
+						// Input is considered to be ARGB8
+						u32 r = (input >> 16) & 0xFF;
+						u32 g = (input >> 8) & 0xFF;
+						u32 b = input & 0xFF;
+
+						r = (r * 32) / 255;
+						g = (g * 64) / 255;
+						b = (b * 32) / 255;
+						return static_cast<u16>((r << 11) | (g << 5) | b);
+					};
+
+					if (rsx->fifo_ctrl->last_cmd() & RSX_METHOD_NON_INCREMENT_CMD_MASK) [[unlikely]]
+					{
+						// Move last 16 bits
+						dst[0] = convert(src[count - 1]);
+						rsx->invalidate_fragment_program(dst_dma, dst_offset, 2);
+						break;
+					}
+
+					for (u32 i = 0; i < count; i++)
+					{
+						dst[i] = convert(src[i]);
+					}
+
+					rsx->invalidate_fragment_program(dst_dma, dst_offset, count * 2);
 					break;
 				}
 				default:
 				{
 					fmt::throw_exception("Unreachable" HERE);
 				}
-				}
-
-				const u16 x = method_registers.nv308a_x();
-				const u16 y = method_registers.nv308a_y();
-				const u32 pixel_offset = (method_registers.blit_engine_output_pitch_nv3062() * y) + (x * write_len);
-				u32 address = get_address(method_registers.blit_engine_output_offset_nv3062() + pixel_offset + (index * write_len), method_registers.blit_engine_output_location_nv3062(), HERE);
-
-				//auto res = vm::passive_lock(address, address + write_len);
-
-				switch (write_len)
-				{
-				case 4:
-					vm::write32(address, color);
-					break;
-				case 2:
-					vm::write16(address, static_cast<u16>(color));
-					break;
-				default:
-					fmt::throw_exception("Unreachable" HERE);
 				}
 
 				//res->release(0);
-				rsx->m_graphics_state |= rsx::pipeline_state::fragment_program_dirty;
+
+				// Skip "handled methods"
+				rsx->fifo_ctrl->skip_methods(count - 1);
 			}
 		};
 	}
@@ -1026,6 +1084,8 @@ namespace rsx
 				const u32 nb_lines = std::min(clip_h, in_h);
 				const u32 data_length = nb_lines * src_line_length;
 
+				rsx->invalidate_fragment_program(dst_dma, dst_offset, data_length);
+
 				if (const auto result = rsx->read_barrier(src_address, data_length, false);
 					result == rsx::result_zcull_intr)
 				{
@@ -1039,6 +1099,8 @@ namespace rsx
 			else
 			{
 				const u32 data_length = in_pitch * (in_h - 1) + src_line_length;
+
+				rsx->invalidate_fragment_program(dst_dma, dst_offset, data_length);
 				rsx->read_barrier(src_address, data_length, true);
 			}
 
@@ -1377,6 +1439,8 @@ namespace rsx
 			const auto write_address = get_address(dst_offset, dst_dma, HERE);
 			const auto data_length = in_pitch * (line_count - 1) + line_length;
 
+			rsx->invalidate_fragment_program(dst_dma, dst_offset, data_length);
+	
 			if (const auto result = rsx->read_barrier(read_address, data_length, !is_block_transfer);
 				result == rsx::result_zcull_intr)
 			{
@@ -1516,6 +1580,11 @@ namespace rsx
 
 	void rsx_state::init()
 	{
+		// Reset all regsiters
+		registers.fill(0);
+		transform_program.fill(0);
+		transform_constants = {};
+
 		// Special values set at initialization, these are not set by a context reset
 		registers[NV4097_SET_SHADER_PROGRAM] = (0 << 2) | (CELL_GCM_LOCATION_LOCAL + 1);
 
@@ -2518,40 +2587,42 @@ namespace rsx
 
 	namespace method_detail
 	{
-		template<int Id, int Step, int Count, template<u32> class T, int Index = 0>
+		template <u32 Id, u32 Step, u32 Count, template<u32> class T, u32 Index = 0>
 		struct bind_range_impl_t
 		{
 			static inline void impl()
 			{
 				methods[Id] = &T<Index>::impl;
-				bind_range_impl_t<Id + Step, Step, Count, T, Index + 1>::impl();
+
+				if constexpr (Count > 1)
+				{
+					bind_range_impl_t<Id + Step, Step, Count - 1, T, Index + 1>::impl();
+				}
 			}
 		};
 
-		template<int Id, int Step, int Count, template<u32> class T>
-		struct bind_range_impl_t<Id, Step, Count, T, Count>
-		{
-			static inline void impl()
-			{
-			}
-		};
-
-		template<int Id, int Step, int Count, template<u32> class T, int Index = 0>
+		template <u32 Id, u32 Step, u32 Count, template<u32> class T, u32 Index = 0>
 		static inline void bind_range()
 		{
+			static_assert(Step && Count && Id + u64{Step} * (Count - 1) < 0x10000 / 4);
+
 			bind_range_impl_t<Id, Step, Count, T, Index>::impl();
 		}
 
-		template<int Id, rsx_method_t Func>
+		template<u32 Id, rsx_method_t Func>
 		static void bind()
 		{
+			static_assert(Id < 0x10000 / 4);
+
 			methods[Id] = Func;
 		}
 
-		template<int Id, int Step, int Count, rsx_method_t Func>
+		template <u32 Id, u32 Step, u32 Count, rsx_method_t Func>
 		static void bind_array()
 		{
-			for (int i = Id; i < Id + Count * Step; i += Step)
+			static_assert(Step && Count && Id + u64{Step} * (Count - 1) < 0x10000 / 4);
+
+			for (u32 i = Id; i < Id + Count * Step; i += Step)
 			{
 				methods[i] = Func;
 			}
@@ -2917,8 +2988,6 @@ namespace rsx
 
 		// Unknown (NV4097?)
 		bind<(0x171c >> 2), trace_method>();
-		bind_array<(0xac00 >> 2), 1, 16, trace_method>(); // Unknown texture control register
-		bind_array<(0xac40 >> 2), 1, 16, trace_method>();
 
 		// NV406E
 		bind<NV406E_SET_REFERENCE, nv406e::set_reference>();
@@ -2945,7 +3014,7 @@ namespace rsx
 		bind_range<NV4097_SET_VERTEX_DATA2S_M, 1, 16, nv4097::set_vertex_data2s_m>();
 		bind_range<NV4097_SET_VERTEX_DATA4S_M, 1, 32, nv4097::set_vertex_data4s_m>();
 		bind_range<NV4097_SET_TRANSFORM_CONSTANT, 1, 32, nv4097::set_transform_constant>();
-		bind_range<NV4097_SET_TRANSFORM_PROGRAM + 3, 4, 128, nv4097::set_transform_program>();
+		bind_range<NV4097_SET_TRANSFORM_PROGRAM, 1, 32, nv4097::set_transform_program>();
 		bind<NV4097_GET_REPORT, nv4097::get_report>();
 		bind<NV4097_CLEAR_REPORT_VALUE, nv4097::clear_report_value>();
 		bind<NV4097_SET_SURFACE_CLIP_HORIZONTAL, nv4097::set_surface_dirty_bit>();
@@ -3025,9 +3094,14 @@ namespace rsx
 		bind<NV4097_SET_INDEX_ARRAY_DMA, nv4097::check_index_array_dma>();
 		bind<NV4097_SET_BLEND_EQUATION, nv4097::set_blend_equation>();
 
-		//NV308A
-		bind_range<NV308A_COLOR, 1, 256, nv308a::color>();
-		bind_range<NV308A_COLOR + 256, 1, 512, nv308a::color, 256>();
+		//NV308A (0xa400..0xbffc!)
+		bind_range<NV308A_COLOR + (256 * 0), 1, 256, nv308a::color, 256 * 0>();
+		bind_range<NV308A_COLOR + (256 * 1), 1, 256, nv308a::color, 256 * 1>();
+		bind_range<NV308A_COLOR + (256 * 2), 1, 256, nv308a::color, 256 * 2>();
+		bind_range<NV308A_COLOR + (256 * 3), 1, 256, nv308a::color, 256 * 3>();
+		bind_range<NV308A_COLOR + (256 * 4), 1, 256, nv308a::color, 256 * 4>();
+		bind_range<NV308A_COLOR + (256 * 5), 1, 256, nv308a::color, 256 * 5>();
+		bind_range<NV308A_COLOR + (256 * 6), 1, 256, nv308a::color, 256 * 6>();
 
 		//NV3089
 		bind<NV3089_IMAGE_IN, nv3089::image_in>();

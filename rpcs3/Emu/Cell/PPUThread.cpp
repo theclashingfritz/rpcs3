@@ -12,6 +12,7 @@
 #include "SPURecompiler.h"
 #include "lv2/sys_sync.h"
 #include "lv2/sys_prx.h"
+#include "lv2/sys_memory.h"
 #include "Emu/GDB.h"
 
 #ifdef LLVM_AVAILABLE
@@ -58,6 +59,8 @@
 
 #include <thread>
 #include <cfenv>
+#include <cctype>
+#include <string>
 
 const bool s_use_ssse3 = utils::has_ssse3();
 
@@ -85,73 +88,8 @@ void fmt_class_string<ppu_join_status>::format(std::string& out, u64 arg)
 	});
 }
 
-template <>
-void fmt_class_string<ppu_decoder_type>::format(std::string& out, u64 arg)
-{
-	format_enum(out, arg, [](ppu_decoder_type type)
-	{
-		switch (type)
-		{
-		case ppu_decoder_type::precise: return "Interpreter (precise)";
-		case ppu_decoder_type::fast: return "Interpreter (fast)";
-		case ppu_decoder_type::llvm: return "Recompiler (LLVM)";
-		}
-
-		return unknown;
-	});
-}
-
-// Table of identical interpreter functions when precise contains SSE2 version, and fast contains SSSE3 functions
-const std::pair<ppu_inter_func_t, ppu_inter_func_t> s_ppu_dispatch_table[]
-{
-#define FUNC(x) {&ppu_interpreter_precise::x, &ppu_interpreter_fast::x}
-	FUNC(VPERM),
-	FUNC(LVLX),
-	FUNC(LVLXL),
-	FUNC(LVRX),
-	FUNC(LVRXL),
-	FUNC(STVLX),
-	FUNC(STVLXL),
-	FUNC(STVRX),
-	FUNC(STVRXL),
-#undef FUNC
-};
-
-extern const ppu_decoder<ppu_interpreter_precise> g_ppu_interpreter_precise([](auto& table)
-{
-	if (s_use_ssse3)
-	{
-		for (auto& func : table)
-		{
-			for (const auto& pair : s_ppu_dispatch_table)
-			{
-				if (pair.first == func)
-				{
-					func = pair.second;
-					break;
-				}
-			}
-		}
-	}
-});
-
-extern const ppu_decoder<ppu_interpreter_fast> g_ppu_interpreter_fast([](auto& table)
-{
-	if (!s_use_ssse3)
-	{
-		for (auto& func : table)
-		{
-			for (const auto& pair : s_ppu_dispatch_table)
-			{
-				if (pair.second == func)
-				{
-					func = pair.first;
-					break;
-				}
-			}
-		}
-	}
-});
+constexpr ppu_decoder<ppu_interpreter_precise> g_ppu_interpreter_precise;
+constexpr ppu_decoder<ppu_interpreter_fast> g_ppu_interpreter_fast;
 
 extern void ppu_initialize();
 extern void ppu_initialize(const ppu_module& info);
@@ -417,13 +355,150 @@ extern bool ppu_patch(u32 addr, u32 value)
 	return true;
 }
 
-std::string ppu_thread::dump() const
+std::string ppu_thread::dump_all() const
 {
-	std::string ret = cpu_thread::dump();
+	std::string ret = cpu_thread::dump_misc();
+	ret += '\n';
+	ret += dump_misc();
+	ret += '\n';
+	ret += dump_regs();
+	ret += '\n';
+	ret += dump_callstack();
+
+	return ret;
+}
+
+std::string ppu_thread::dump_regs() const
+{
+	std::string ret;
+
+	for (uint i = 0; i < 32; ++i)
+	{
+		auto reg = gpr[i];
+
+		fmt::append(ret, "r%d%s = 0x%-8llx", i, i <= 9 ? " " : "", reg);
+
+		const u32 max_str_len = 32;
+		const u32 hex_count = 8;
+
+		if (reg <= UINT32_MAX && vm::check_addr(static_cast<u32>(reg), max_str_len, vm::page_readable))
+		{
+			const u64 reg_ptr = vm::read64(reg);
+
+			if (reg_ptr <= UINT32_MAX && vm::check_addr(static_cast<u32>(reg_ptr), max_str_len, vm::page_readable))
+			{
+				reg = reg_ptr;
+			}
+
+			const auto gpr_buf = vm::get_super_ptr<u8>(reg);
+
+			std::string buf_tmp(gpr_buf, gpr_buf + max_str_len);
+
+			if (std::isprint(static_cast<u8>(buf_tmp[0])) && std::isprint(static_cast<u8>(buf_tmp[1])) && std::isprint(static_cast<u8>(buf_tmp[2])))
+			{
+				fmt::append(ret, " -> \"%s\"", buf_tmp.c_str());
+			}
+			else
+			{
+				fmt::append(ret, " -> ");
+
+				for (u32 j = 0; j < hex_count; ++j)
+				{
+					fmt::append(ret, "%02x ", buf_tmp[j]);
+				}
+			}
+		}
+
+		fmt::append(ret, "\n");
+	}
+
+	for (uint i = 0; i < 32; ++i)
+	{
+		fmt::append(ret, "f%d%s = %.6G\n", i, i <= 9 ? " " : "", fpr[i]);
+	}
+
+	for (uint i = 0; i < 32; ++i)
+	{
+		fmt::append(ret, "v%d%s = %s [x: %g y: %g z: %g w: %g]\n", i, i <= 9 ? " " : "", vr[i], vr[i]._f[3], vr[i]._f[2], vr[i]._f[1], vr[i]._f[0]);
+	}
+
+	fmt::append(ret, "CR = 0x%08x\n", cr.pack());
+	fmt::append(ret, "LR = 0x%llx\n", lr);
+	fmt::append(ret, "CTR = 0x%llx\n", ctr);
+	fmt::append(ret, "VRSAVE = 0x%08x\n", vrsave);
+	fmt::append(ret, "XER = [CA=%u | OV=%u | SO=%u | CNT=%u]\n", xer.ca, xer.ov, xer.so, xer.cnt);
+	fmt::append(ret, "VSCR = [SAT=%u | NJ=%u]\n", sat, nj);
+	fmt::append(ret, "FPSCR = [FL=%u | FG=%u | FE=%u | FU=%u]\n", fpscr.fl, fpscr.fg, fpscr.fe, fpscr.fu);
+
+	return ret;
+}
+
+std::string ppu_thread::dump_callstack() const
+{
+	std::string ret;
+
+	fmt::append(ret, "Call stack:\n=========\n0x%08x (0x0) called\n", cia);
+
+	for (u32 sp : dump_callstack_list())
+	{
+		// TODO: function addresses too
+		fmt::append(ret, "> from 0x%08x (0x0)\n", sp);
+	}
+
+	return ret;
+}
+
+std::vector<u32> ppu_thread::dump_callstack_list() const
+{
+	//std::shared_lock rlock(vm::g_mutex); // Needs optimizations
+
+	// Determine stack range
+	const u32 stack_ptr = static_cast<u32>(gpr[1]);
+
+	if (!vm::check_addr(stack_ptr, 1, vm::page_writable))
+	{
+		// Normally impossible unless the code does not follow ABI rules
+		return {};
+	}
+
+	u32 stack_min = stack_ptr & ~0xfff;
+	u32 stack_max = stack_min + 4096;
+
+	while (stack_min && vm::check_addr(stack_min - 4096, 4096, vm::page_writable))
+	{
+		stack_min -= 4096;
+	}
+
+	while (stack_max + 4096 && vm::check_addr(stack_max, 4096, vm::page_writable))
+	{
+		stack_max += 4096;
+	}
+
+	std::vector<u32> call_stack_list;
+
+	for (
+		u64 sp = *vm::get_super_ptr<u64>(stack_ptr);
+		sp >= stack_min && std::max(sp, sp + 0x200) < stack_max;
+		sp = *vm::get_super_ptr<u64>(static_cast<u32>(sp))
+		)
+	{
+		// TODO: function addresses too
+		call_stack_list.push_back(*vm::get_super_ptr<u64>(static_cast<u32>(sp + 16)));
+	}
+
+	return call_stack_list;
+}
+
+std::string ppu_thread::dump_misc() const
+{
+	std::string ret;
+
 	fmt::append(ret, "Priority: %d\n", +prio);
 	fmt::append(ret, "Stack: 0x%x..0x%x\n", stack_addr, stack_addr + stack_size - 1);
 	fmt::append(ret, "Joiner: %s\n", joiner.load());
-	fmt::append(ret, "Commands: %u\n", cmd_queue.size());
+
+	if (const auto size = cmd_queue.size())
+		fmt::append(ret, "Commands: %u\n", size);
 
 	const char* _func = current_function;
 
@@ -434,7 +509,8 @@ std::string ppu_thread::dump() const
 		ret += '\n';
 
 		for (u32 i = 3; i <= 6; i++)
-			fmt::append(ret, " ** GPR[%d] = 0x%llx\n", i, syscall_args[i - 3]);
+			if (gpr[i] != syscall_args[i - 3])
+				fmt::append(ret, " ** r%d = 0x%llx\n", i, syscall_args[i - 3]);
 	}
 	else if (is_paused())
 	{
@@ -460,51 +536,6 @@ std::string ppu_thread::dump() const
 	{
 		ret += '\n';
 	}
-
-	ret += "\nRegisters:\n=========\n";
-	for (uint i = 0; i < 32; ++i) fmt::append(ret, "GPR[%d] = 0x%llx\n", i, gpr[i]);
-	for (uint i = 0; i < 32; ++i) fmt::append(ret, "FPR[%d] = %.6G\n", i, fpr[i]);
-	for (uint i = 0; i < 32; ++i) fmt::append(ret, "VR[%d] = %s [x: %g y: %g z: %g w: %g]\n", i, vr[i], vr[i]._f[3], vr[i]._f[2], vr[i]._f[1], vr[i]._f[0]);
-
-	fmt::append(ret, "CR = 0x%08x\n", cr.pack());
-	fmt::append(ret, "LR = 0x%llx\n", lr);
-	fmt::append(ret, "CTR = 0x%llx\n", ctr);
-	fmt::append(ret, "VRSAVE = 0x%08x\n", vrsave);
-	fmt::append(ret, "XER = [CA=%u | OV=%u | SO=%u | CNT=%u]\n", xer.ca, xer.ov, xer.so, xer.cnt);
-	fmt::append(ret, "VSCR = [SAT=%u | NJ=%u]\n", sat, nj);
-	fmt::append(ret, "FPSCR = [FL=%u | FG=%u | FE=%u | FU=%u]\n", fpscr.fl, fpscr.fg, fpscr.fe, fpscr.fu);
-	fmt::append(ret, "\nCall stack:\n=========\n0x%08x (0x0) called\n", cia);
-
-	//std::shared_lock rlock(vm::g_mutex); // Needs optimizations
-
-	// Determine stack range
-	u32 stack_ptr = static_cast<u32>(gpr[1]);
-
-	if (!vm::check_addr(stack_ptr, 1, vm::page_writable))
-	{
-		// Normally impossible unless the code does not follow ABI rules
-		return ret;
-	}
-
-	u32 stack_min = stack_ptr & ~0xfff;
-	u32 stack_max = stack_min + 4096;
-
-	while (stack_min && vm::check_addr(stack_min - 4096, 4096, vm::page_writable))
-	{
-		stack_min -= 4096;
-	}
-
-	while (stack_max + 4096 && vm::check_addr(stack_max, 4096, vm::page_writable))
-	{
-		stack_max += 4096;
-	}
-
-	for (u64 sp = *vm::get_super_ptr<u64>(stack_ptr); sp >= stack_min && std::max(sp, sp + 0x200) < stack_max; sp = *vm::get_super_ptr<u64>(static_cast<u32>(sp)))
-	{
-		// TODO: print also function addresses
-		fmt::append(ret, "> from 0x%08llx (0x0)\n", *vm::get_super_ptr<u64>(static_cast<u32>(sp + 16)));
-	}
-
 	return ret;
 }
 
@@ -571,6 +602,12 @@ void ppu_thread::cpu_task()
 			cmd_pop(), ppu_function_manager::get().at(arg)(*this);
 			break;
 		}
+		case ppu_cmd::opd_call:
+		{
+			const ppu_func_opd_t opd = cmd_get(1).as<ppu_func_opd_t>(); 
+			cmd_pop(1), fast_call(opd.addr, opd.rtoc);
+			break;
+		}
 		case ppu_cmd::ptr_call:
 		{
 			const ppu_function_t func = cmd_get(1).as<ppu_function_t>();
@@ -635,7 +672,7 @@ void ppu_thread::exec_task()
 	{
 		const auto exec_op = [this](u64 op)
 		{
-			return reinterpret_cast<func_t>(op & 0xffffffff)(*this, {static_cast<u32>(op >> 32)});
+			return reinterpret_cast<func_t>(op & 0xffffffff)(*this, { static_cast<u32>(op >> 32) });
 		};
 
 		if (cia % 8 || state) [[unlikely]]
@@ -703,6 +740,11 @@ ppu_thread::~ppu_thread()
 {
 	// Deallocate Stack Area
 	vm::dealloc_verbose_nothrow(stack_addr, vm::stack);
+
+	if (const auto dct = g_fxo->get<lv2_memory_container>())
+	{
+		dct->used -= stack_size;
+	}
 }
 
 ppu_thread::ppu_thread(const ppu_thread_params& param, std::string_view name, u32 prio, int detached)
@@ -711,6 +753,7 @@ ppu_thread::ppu_thread(const ppu_thread_params& param, std::string_view name, u3
 	, stack_size(param.stack_size)
 	, stack_addr(param.stack_addr)
 	, joiner(detached != 0 ? ppu_join_status::detached : ppu_join_status::joinable)
+	, entry_func(param.entry)
 	, start_time(get_guest_system_time())
 	, ppu_tname(stx::shared_cptr<std::string>::make(name))
 {
@@ -724,13 +767,8 @@ ppu_thread::ppu_thread(const ppu_thread_params& param, std::string_view name, u3
 		cmd_list
 		({
 		    {ppu_cmd::set_args, 2}, param.arg0, param.arg1,
-		    {ppu_cmd::lle_call, param.entry},
+		    {ppu_cmd::opd_call, 0}, std::bit_cast<u64>(entry_func),
 		});
-	}
-	else
-	{
-		// Save entry for further use (interrupt handler workaround)
-		gpr[2] = param.entry;
 	}
 
 	// Trigger the scheduler
@@ -1580,6 +1618,7 @@ extern void ppu_initialize(const ppu_module& info)
 			enum class ppu_settings : u32
 			{
 				non_win32,
+				accurate_fma,
 
 				__bitset_enum_max
 			};
@@ -1589,6 +1628,10 @@ extern void ppu_initialize(const ppu_module& info)
 #ifndef _WIN32
 			settings += ppu_settings::non_win32;
 #endif
+			if (g_cfg.core.llvm_accurate_dfma)
+			{
+				settings += ppu_settings::accurate_fma;
+			}
 
 			// Write version, hash, CPU, settings
 			fmt::append(obj_name, "v3-tane-%s-%s-%s.obj", fmt::base57(output, 16), fmt::base57(settings), jit_compiler::cpu(g_cfg.core.llvm_cpu));
@@ -1611,7 +1654,7 @@ extern void ppu_initialize(const ppu_module& info)
 		link_workload.emplace_back(obj_name, false);
 
 		// Check object file
-		if (fs::is_file(cache_path + obj_name + ".gz") || fs::is_file(cache_path + obj_name))
+		if (jit_compiler::check(cache_path + obj_name))
 		{
 			if (!jit)
 			{

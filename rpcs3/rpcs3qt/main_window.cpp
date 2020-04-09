@@ -93,13 +93,9 @@ void main_window::Init()
 	Q_EMIT RequestGlobalStylesheetChange(m_gui_settings->GetCurrentStylesheetPath());
 	ConfigureGuiFromSettings(true);
 
-#ifdef BRANCH
-	if ("RPCS3/rpcs3/master"s != STRINGIZE(BRANCH) && ""s != STRINGIZE(BRANCH))
-#else
-	if (false)
-#endif
+	if (const std::string_view branch_name = rpcs3::get_full_branch(); branch_name != "RPCS3/rpcs3/master" && branch_name != "local_build")
 	{
-		gui_log.warning("Experimental Build Warning! Build origin: " STRINGIZE(BRANCH));
+		gui_log.warning("Experimental Build Warning! Build origin: %s", branch_name);
 
 		QMessageBox msg;
 		msg.setWindowTitle(tr("Experimental Build Warning"));
@@ -117,7 +113,7 @@ void main_window::Init()
 					Do you wish to use this build anyway?
 				</p>
 			)"
-		)).arg(Qt::convertFromPlainText(STRINGIZE(BRANCH))));
+		)).arg(Qt::convertFromPlainText(branch_name.data())));
 		msg.layout()->setSizeConstraint(QLayout::SetFixedSize);
 
 		if (msg.exec() == QMessageBox::No)
@@ -667,7 +663,7 @@ void main_window::HandlePupInstallation(QString file_path)
 		version_string.erase(version_pos);
 	}
 
-	const std::string cur_version = "4.85";
+	const std::string cur_version = "4.86";
 
 	if (version_string < cur_version &&
 		QMessageBox::question(this, tr("RPCS3 Firmware Installer"), tr("Old firmware detected.\nThe newest firmware version is %1 and you are trying to install version %2\nContinue installation?").arg(qstr(cur_version), qstr(version_string)),
@@ -995,6 +991,7 @@ void main_window::OnEmuStop()
 
 	m_debugger_frame->EnableButtons(false);
 	m_debugger_frame->ClearBreakpoints();
+	m_debugger_frame->ClearCallStack();
 
 	ui->sysPauseAct->setText(Emu.IsReady() ? tr("&Play\tCtrl+E") : tr("&Resume\tCtrl+E"));
 	ui->sysPauseAct->setIcon(m_icon_play);

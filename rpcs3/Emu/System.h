@@ -175,10 +175,10 @@ public:
 	bool BootRsxCapture(const std::string& path);
 	bool InstallPkg(const std::string& path);
 
-private:
-	void LimitCacheSize();
+#ifdef _WIN32
+	static std::string GetExeDir();
+#endif
 
-public:
 	static std::string GetEmuDir();
 	static std::string GetHddDir();
 	static std::string GetHdd1Dir();
@@ -210,6 +210,11 @@ public:
 	std::string GetFormattedTitle(double fps) const;
 
 	u32 GetMaxThreads() const;
+
+	void ConfigureLogs();
+
+private:
+	void LimitCacheSize();
 };
 
 extern Emulator Emu;
