@@ -1,4 +1,7 @@
-﻿set(SRC_FILES
+﻿# prevent WolfSSL from warning about not having harden options
+add_compile_definitions(WC_NO_HARDEN)
+
+set(SRC_FILES
 	about_dialog.cpp
 	auto_pause_settings_dialog.cpp
 	breakpoint_handler.cpp
@@ -6,10 +9,12 @@
 	call_stack_list.cpp
 	cg_disasm_window.cpp
 	cheat_manager.cpp
+	config_adapter.cpp
 	curl_handle.cpp
 	custom_dialog.cpp
 	debugger_frame.cpp
 	debugger_list.cpp
+	downloader.cpp
 	_discord_utils.cpp
 	emu_settings.cpp
 	fatal_error_dialog.cpp
@@ -26,6 +31,7 @@
 	instruction_editor_dialog.cpp
 	kernel_explorer.cpp
 	localized.cpp
+	localized_emu.h
 	log_frame.cpp
 	main_window.cpp
 	memory_string_searcher.cpp
@@ -35,12 +41,14 @@
 	osk_dialog_frame.cpp
 	pad_led_settings_dialog.cpp
 	pad_settings_dialog.cpp
+	patch_manager_dialog.cpp
 	persistent_settings.cpp
 	pkg_install_dialog.cpp
 	progress_dialog.cpp
 	qt_utils.cpp
 	register_editor_dialog.cpp
 	render_creator.cpp
+	rpcn_settings_dialog.cpp
 	rsx_debugger.cpp
 	save_data_dialog.cpp
 	save_data_info_dialog.cpp

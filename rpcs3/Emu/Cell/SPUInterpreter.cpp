@@ -54,7 +54,7 @@ namespace asmjit
 
 		c.mov(x86::eax, op);
 
-		if (I >= 4)
+		if constexpr (I >= 4)
 		{
 			c.shr(x86::eax, I - 4);
 			c.and_(x86::eax, 0x7f << 4);
@@ -112,11 +112,7 @@ void spu_interpreter::set_interrupt_status(spu_thread& spu, spu_opcode_t op)
 		spu.set_interrupt_status(false);
 	}
 
-	if (spu.interrupts_enabled && (spu.ch_event_mask & spu.ch_event_stat & SPU_EVENT_INTR_IMPLEMENTED) > 0)
-	{
-		spu.interrupts_enabled = false;
-		spu.srr0 = std::exchange(spu.pc, 0);
-	}
+	spu.check_mfc_interrupts(spu.pc);
 }
 
 
@@ -522,7 +518,7 @@ bool spu_interpreter::BISLED(spu_thread& spu, spu_opcode_t op)
 	const u32 target = spu_branch_target(spu.gpr[op.ra]._u32[3]);
 	spu.gpr[op.rt] = v128::from32r(spu_branch_target(spu.pc + 4));
 
-	if (spu.get_events())
+	if (spu.get_events().count)
 	{
 		spu.pc = target;
 		set_interrupt_status(spu, op);
@@ -903,7 +899,7 @@ bool spu_interpreter::CLZ(spu_thread& spu, spu_opcode_t op)
 {
 	for (u32 i = 0; i < 4; i++)
 	{
-		spu.gpr[op.rt]._u32[i] = utils::cntlz32(spu.gpr[op.ra]._u32[i]);
+		spu.gpr[op.rt]._u32[i] = std::countl_zero(spu.gpr[op.ra]._u32[i]);
 	}
 	return true;
 }

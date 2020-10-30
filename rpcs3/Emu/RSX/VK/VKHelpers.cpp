@@ -32,7 +32,7 @@ namespace vk
 		table.add(0x15DD, chip_class::AMD_vega); // Raven Ridge
 		table.add(0x15D8, chip_class::AMD_vega); // Raven Ridge
 		table.add(0x7310, 0x731F, chip_class::AMD_navi); // Navi10
-		table.add(0x7340, 0x7340, chip_class::AMD_navi); // Navi14
+		table.add(0x7340, 0x734F, chip_class::AMD_navi); // Navi14
 
 		return table;
 	}();
@@ -55,11 +55,10 @@ namespace vk
 		table.add(0x15F7, 0x15F9, chip_class::NV_pascal); // GP100 (Tesla P100)
 		table.add(0x1B00, 0x1D80, chip_class::NV_pascal);
 		table.add(0x1D81, 0x1DBA, chip_class::NV_volta);
-		table.add(0x1E02, 0x1F51, chip_class::NV_turing); // RTX 20 series
-		table.add(0x2182, chip_class::NV_turing); // TU116
-		table.add(0x2184, chip_class::NV_turing); // TU116
-		table.add(0x1F82, chip_class::NV_turing); // TU117
-		table.add(0x1F91, chip_class::NV_turing); // TU117
+		table.add(0x1E02, 0x1F54, chip_class::NV_turing); // TU102, TU104, TU106, TU106M, TU106GL (RTX 20 series)
+		table.add(0x1F82, 0x1FB9, chip_class::NV_turing); // TU117, TU117M, TU117GL
+		table.add(0x2182, 0x21D1, chip_class::NV_turing); // TU116, TU116M, TU116GL
+		table.add(0x20B0, 0x20BE, chip_class::NV_ampere); // GA100
 
 		return table;
 	}();
@@ -67,18 +66,15 @@ namespace vk
 	const context* g_current_vulkan_ctx = nullptr;
 	const render_device* g_current_renderer;
 
-	std::unique_ptr<image> g_null_texture;
 	std::unique_ptr<buffer> g_scratch_buffer;
-	std::unordered_map<VkImageViewType, std::unique_ptr<image_view>> g_null_image_views;
+	std::unordered_map<VkImageViewType, std::unique_ptr<viewable_image>> g_null_image_views;
 	std::unordered_map<u32, std::unique_ptr<image>> g_typeless_textures;
 	std::unordered_map<u32, std::unique_ptr<vk::compute_task>> g_compute_tasks;
+	std::unordered_map<u32, std::unique_ptr<vk::overlay_pass>> g_overlay_passes;
 
 	// General purpose upload heap
 	// TODO: Clean this up and integrate cleanly with VKGSRender
 	data_heap g_upload_heap;
-
-	// Garbage collection
-	std::vector<std::unique_ptr<image>> g_deleted_typeless_textures;
 
 	VkSampler g_null_sampler = nullptr;
 
@@ -88,7 +84,7 @@ namespace vk
 	VkFlags g_heap_compatible_buffer_types = 0;
 	driver_vendor g_driver_vendor = driver_vendor::unknown;
 	chip_class g_chip_class = chip_class::unknown;
-	bool g_drv_no_primitive_restart_flag = false;
+	bool g_drv_no_primitive_restart = false;
 	bool g_drv_sanitize_fp_values = false;
 	bool g_drv_disable_fence_reset = false;
 	bool g_drv_emulate_cond_render = false;
@@ -295,30 +291,60 @@ namespace vk
 		if (auto found = g_null_image_views.find(type);
 			found != g_null_image_views.end())
 		{
-			return found->second.get();
+			return found->second->get_view(VK_REMAP_IDENTITY, rsx::default_remap_vector);
 		}
 
-		if (!g_null_texture)
+		VkImageType image_type;
+		u32 num_layers = 1;
+		u32 flags = 0;
+		u16 size = 4;
+
+		switch (type)
 		{
-			g_null_texture = std::make_unique<image>(*g_current_renderer, g_current_renderer->get_memory_mapping().device_local, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-				VK_IMAGE_TYPE_2D, VK_FORMAT_B8G8R8A8_UNORM, 4, 4, 1, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-				VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0);
-
-			// Initialize memory to transparent black
-			VkClearColorValue clear_color = {};
-			VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-			change_image_layout(cmd, g_null_texture.get(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, range);
-			vkCmdClearColorImage(cmd, g_null_texture->value, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
-
-			// Prep for shader access
-			change_image_layout(cmd, g_null_texture.get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, range);
+		case VK_IMAGE_VIEW_TYPE_1D:
+			image_type = VK_IMAGE_TYPE_1D;
+			size = 1;
+			break;
+		case VK_IMAGE_VIEW_TYPE_2D:
+			image_type = VK_IMAGE_TYPE_2D;
+			break;
+		case VK_IMAGE_VIEW_TYPE_3D:
+			image_type = VK_IMAGE_TYPE_3D;
+			break;
+		case VK_IMAGE_VIEW_TYPE_CUBE:
+			image_type = VK_IMAGE_TYPE_2D;
+			flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+			num_layers = 6;
+			break;
+		case VK_IMAGE_VIEW_TYPE_2D_ARRAY:
+			image_type = VK_IMAGE_TYPE_2D;
+			num_layers = 2;
+			break;
+		default:
+			rsx_log.fatal("Unexpected image view type 0x%x", static_cast<u32>(type));
+			return nullptr;
 		}
 
-		auto& ret = g_null_image_views[type] = std::make_unique<image_view>(*g_current_renderer, g_null_texture.get(), type);
-		return ret.get();
+		auto& tex = g_null_image_views[type];
+		tex = std::make_unique<viewable_image>(*g_current_renderer, g_current_renderer->get_memory_mapping().device_local, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			image_type, VK_FORMAT_B8G8R8A8_UNORM, size, size, 1, 1, num_layers, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+			VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, flags);
+
+		// Initialize memory to transparent black
+		tex->change_layout(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+		VkClearColorValue clear_color = {};
+		VkImageSubresourceRange range = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		vkCmdClearColorImage(cmd, tex->value, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_color, 1, &range);
+
+		// Prep for shader access
+		tex->change_layout(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+		// Return view
+		return tex->get_view(VK_REMAP_IDENTITY, rsx::default_remap_vector);
 	}
 
-	vk::image* get_typeless_helper(VkFormat format, u32 requested_width, u32 requested_height)
+	vk::image* get_typeless_helper(VkFormat format, rsx::format_class format_class, u32 requested_width, u32 requested_height)
 	{
 		auto create_texture = [&]()
 		{
@@ -330,13 +356,16 @@ namespace vk
 				VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0);
 		};
 
-		auto& ptr = g_typeless_textures[+format];
+		const u32 key = (format_class << 24u) | format;
+		auto& ptr = g_typeless_textures[key];
+
 		if (!ptr || ptr->width() < requested_width || ptr->height() < requested_height)
 		{
 			if (ptr)
 			{
-				// Safely move to deleted pile
-				g_deleted_typeless_textures.emplace_back(std::move(ptr));
+				requested_width = std::max(requested_width, ptr->width());
+				requested_height = std::max(requested_height, ptr->height());
+				get_resource_manager()->dispose(ptr);
 			}
 
 			ptr.reset(create_texture());
@@ -384,10 +413,19 @@ namespace vk
 		}
 	}
 
+	void reset_overlay_passes()
+	{
+		for (const auto& p : g_overlay_passes)
+		{
+			p.second->free_resources();
+		}
+	}
+
 	void reset_global_resources()
 	{
 		vk::reset_compute_tasks();
 		vk::reset_resolve_resources();
+		vk::reset_overlay_passes();
 
 		g_upload_heap.reset_allocation_stats();
 	}
@@ -402,13 +440,11 @@ namespace vk
 		vk::vmm_reset();
 		vk::get_resource_manager()->destroy();
 
-		g_null_texture.reset();
 		g_null_image_views.clear();
 		g_scratch_buffer.reset();
 		g_upload_heap.destroy();
 
 		g_typeless_textures.clear();
-		g_deleted_typeless_textures.clear();
 
 		if (g_null_sampler)
 		{
@@ -420,8 +456,13 @@ namespace vk
 		{
 			p.second->destroy();
 		}
-
 		g_compute_tasks.clear();
+
+		for (const auto& p : g_overlay_passes)
+		{
+			p.second->destroy();
+		}
+		g_overlay_passes.clear();
 	}
 
 	vk::mem_allocator_base* get_current_mem_allocator()
@@ -449,7 +490,7 @@ namespace vk
 	{
 		g_current_renderer = &device;
 		g_runtime_state.clear();
-		g_drv_no_primitive_restart_flag = false;
+		g_drv_no_primitive_restart = false;
 		g_drv_sanitize_fp_values = false;
 		g_drv_disable_fence_reset = false;
 		g_drv_emulate_cond_render = (g_cfg.video.relaxed_zcull_sync && !g_current_renderer->get_conditional_render_support());
@@ -466,6 +507,9 @@ namespace vk
 		switch (g_driver_vendor)
 		{
 		case driver_vendor::AMD:
+			// Primitive restart on older GCN is still broken
+			g_drv_no_primitive_restart = (g_chip_class == vk::chip_class::AMD_gcn_generic);
+			break;
 		case driver_vendor::RADV:
 			// Previous bugs with fence reset and primitive restart seem to have been fixed with newer drivers
 			break;
@@ -536,7 +580,7 @@ namespace vk
 
 	bool emulate_primitive_restart(rsx::primitive_type type)
 	{
-		if (g_drv_no_primitive_restart_flag)
+		if (g_drv_no_primitive_restart)
 		{
 			switch (type)
 			{
@@ -777,7 +821,7 @@ namespace vk
 	{
 		if (image->current_layout == new_layout) return;
 
-		change_image_layout(cmd, image->value, image->current_layout, new_layout, { image->aspect(), 0, 1, 0, 1 });
+		change_image_layout(cmd, image->value, image->current_layout, new_layout, { image->aspect(), 0, image->mipmaps(), 0, image->layers() });
 		image->current_layout = new_layout;
 	}
 

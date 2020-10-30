@@ -45,7 +45,9 @@ namespace rsx
 		void set_reference(thread* rsx, u32 _reg, u32 arg)
 		{
 			rsx->sync();
-			rsx->ctrl->ref.exchange(arg);
+
+			// Write ref+get atomically (get will be written again with the same value at command end)
+			vm::_ref<atomic_be_t<u64>>(rsx->dma_address + ::offset32(&RsxDmaControl::get)).store(u64{rsx->fifo_ctrl->get_pos()} << 32 | arg);
 		}
 
 		void semaphore_acquire(thread* rsx, u32 /*_reg*/, u32 arg)
@@ -53,7 +55,7 @@ namespace rsx
 			rsx->sync_point_request.release(true);
 			const u32 addr = get_address(method_registers.semaphore_offset_406e(), method_registers.semaphore_context_dma_406e(), HERE);
 
-			const auto& sema = vm::_ref<atomic_be_t<u32>>(addr);
+			const auto& sema = vm::_ref<RsxSemaphore>(addr).val;
 
 			// TODO: Remove vblank semaphore hack
 			if (addr == rsx->device_addr + 0x30) return;
@@ -125,6 +127,13 @@ namespace rsx
 			rsx->sync();
 
 			const u32 offset = method_registers.semaphore_offset_406e();
+
+			if (offset % 4)
+			{
+				rsx_log.warning("NV406E semaphore release is using unaligned semaphore, ignoring. (offset=0x%x)", offset);
+				return;
+			}
+
 			const u32 ctxt = method_registers.semaphore_context_dma_406e();
 
 			// By avoiding doing this on flip's semaphore release
@@ -137,18 +146,13 @@ namespace rsx
 
 			const u32 addr = get_address(offset, ctxt, HERE);
 
-			if (g_use_rtm) [[likely]]
+			// TODO: Check if possible to write on reservations
+			if (rsx->label_addr >> 28 != addr >> 28)
 			{
-				vm::_ref<atomic_be_t<u32>>(addr) = arg;
-			}
-			else
-			{
-				auto& res = vm::reservation_lock(addr, 4);
-				vm::write32(addr, arg);
-				res &= -128;
+				rsx_log.fatal("NV406E semaphore unexpected address. Please report to the developers. (offset=0x%x, addr=0x%x)", offset, addr);
 			}
 
-			vm::reservation_notifier(addr, 4).notify_all();
+			vm::_ref<RsxSemaphore>(addr).val = arg;
 		}
 	}
 
@@ -219,13 +223,16 @@ namespace rsx
 
 			// lle-gcm likes to inject system reserved semaphores, presumably for system/vsh usage
 			// Avoid calling render to avoid any havoc(flickering) they may cause from invalid flush/write
-			const u32 offset = method_registers.semaphore_offset_4097() & -16;
-			vm::_ref<atomic_t<RsxSemaphore>>(get_address(offset, method_registers.semaphore_context_dma_4097(), HERE)).store(
+			const u32 offset = method_registers.semaphore_offset_4097();
+
+			if (offset % 16)
 			{
-				arg,
-				0,
-				rsx->timestamp()
-			});
+				rsx_log.error("NV4097 semaphore using unaligned offset, recovering. (offset=0x%x)", offset);
+				rsx->recover_fifo();
+				return;
+			}
+
+			vm::_ref<RsxSemaphore>(get_address(offset, method_registers.semaphore_context_dma_4097(), HERE)).val = arg;
 		}
 
 		void back_end_write_semaphore_release(thread* rsx, u32 _reg, u32 arg)
@@ -234,14 +241,17 @@ namespace rsx
 			g_fxo->get<rsx::dma_manager>()->sync();
 			rsx->sync();
 
-			const u32 offset = method_registers.semaphore_offset_4097() & -16;
-			const u32 val = (arg & 0xff00ff00) | ((arg & 0xff) << 16) | ((arg >> 16) & 0xff);
-			vm::_ref<atomic_t<RsxSemaphore>>(get_address(offset, method_registers.semaphore_context_dma_4097(), HERE)).store(
+			const u32 offset = method_registers.semaphore_offset_4097();
+
+			if (offset % 16)
 			{
-				val,
-				0,
-				rsx->timestamp()
-			});
+				rsx_log.error("NV4097 semaphore using unaligned offset, recovering. (offset=0x%x)", offset);
+				rsx->recover_fifo();
+				return;
+			}
+
+			const u32 val = (arg & 0xff00ff00) | ((arg & 0xff) << 16) | ((arg >> 16) & 0xff);
+			vm::_ref<RsxSemaphore>(get_address(offset, method_registers.semaphore_context_dma_4097(), HERE)).val = val;
 		}
 
 		/**
@@ -701,10 +711,37 @@ namespace rsx
 			set_surface_dirty_bit(rsx, reg, arg);
 		}
 
-		void set_surface_options_dirty_bit(thread* rsx, u32, u32)
+		void set_surface_options_dirty_bit(thread* rsx, u32 reg, u32 arg)
 		{
-			if (rsx->m_framebuffer_state_contested)
-				rsx->m_rtts_dirty = true;
+			if (arg != method_registers.register_previous_value)
+			{
+				rsx->on_framebuffer_options_changed(reg);
+			}
+		}
+
+		void set_stencil_op(thread* rsx, u32 reg, u32 arg)
+		{
+			if (arg != method_registers.register_previous_value)
+			{
+				switch (arg)
+				{
+				case CELL_GCM_INVERT:
+				case CELL_GCM_KEEP:
+				case CELL_GCM_REPLACE:
+				case CELL_GCM_INCR:
+				case CELL_GCM_DECR:
+				case CELL_GCM_INCR_WRAP:
+				case CELL_GCM_DECR_WRAP:
+				case CELL_GCM_ZERO:
+					set_surface_options_dirty_bit(rsx, reg, arg);
+					break;
+
+				default:
+					// Ignored on RSX
+					method_registers.decode(reg, method_registers.register_previous_value);
+					break;
+				}
+			}
 		}
 
 		template <u32 RsxFlags>
@@ -772,13 +809,44 @@ namespace rsx
 				case CELL_GCM_FUNC_ADD_SIGNED:
 				case CELL_GCM_FUNC_REVERSE_ADD_SIGNED:
 					break;
-			
+
 				default:
 				{
 					// Ignore invalid values as a whole
 					method_registers.decode(reg, method_registers.register_previous_value);
 					return;
 				}
+				}
+			}
+		}
+
+		void set_blend_factor(thread* rsx, u32 reg, u32 arg)
+		{
+			for (u32 i = 0; i < 32u; i += 16)
+			{
+				switch ((arg >> i) & 0xffff)
+				{
+				case CELL_GCM_ZERO:
+				case CELL_GCM_ONE:
+				case CELL_GCM_SRC_COLOR:
+				case CELL_GCM_ONE_MINUS_SRC_COLOR:
+				case CELL_GCM_SRC_ALPHA:
+				case CELL_GCM_ONE_MINUS_SRC_ALPHA:
+				case CELL_GCM_DST_ALPHA:
+				case CELL_GCM_ONE_MINUS_DST_ALPHA:
+				case CELL_GCM_DST_COLOR:
+				case CELL_GCM_ONE_MINUS_DST_COLOR:
+				case CELL_GCM_SRC_ALPHA_SATURATE:
+				case CELL_GCM_CONSTANT_COLOR:
+				case CELL_GCM_ONE_MINUS_CONSTANT_COLOR:
+				case CELL_GCM_CONSTANT_ALPHA:
+				case CELL_GCM_ONE_MINUS_CONSTANT_ALPHA:
+					break;
+
+				default:
+					// Ignore invalid values as a whole
+					method_registers.decode(reg, method_registers.register_previous_value);
+					return;
 				}
 			}
 		}
@@ -807,18 +875,6 @@ namespace rsx
 				if (rsx->current_vp_metadata.referenced_textures_mask & (1 << index))
 				{
 					rsx->m_graphics_state |= rsx::pipeline_state::vertex_program_dirty;
-				}
-			}
-		};
-
-		template<u32 index>
-		struct set_viewport_dirty_bit
-		{
-			static void impl(thread* rsx, u32 _reg, u32 arg)
-			{
-				if (arg != method_registers.register_previous_value)
-				{
-					rsx->m_graphics_state |= rsx::pipeline_state::vertex_state_dirty;
 				}
 			}
 		};
@@ -863,10 +919,13 @@ namespace rsx
 				{
 					// Bit cast - optimize to mem copy
 
-					const auto dst = vm::_ptr<u8>(get_address(dst_offset + (x * 4) + (out_pitch * y), dst_dma, HERE));
-					const auto src = vm::_ptr<const u8>(get_address(src_offset, CELL_GCM_LOCATION_MAIN, HERE));
+					const auto dst_address = get_address(dst_offset + (x * 4) + (out_pitch * y), dst_dma, HERE);
+					const auto src_address = get_address(src_offset, CELL_GCM_LOCATION_MAIN, HERE);
+					const auto dst = vm::_ptr<u8>(dst_address);
+					const auto src = vm::_ptr<const u8>(src_address);
 
 					const u32 data_length = count * 4;
+					auto res = rsx::reservation_lock<true>(dst_address, data_length, src_address, data_length);
 
 					if (rsx->fifo_ctrl->last_cmd() & RSX_METHOD_NON_INCREMENT_CMD_MASK) [[unlikely]]
 					{
@@ -894,8 +953,13 @@ namespace rsx
 				}
 				case blit_engine::transfer_destination_format::r5g6b5:
 				{
-					const auto dst = vm::_ptr<u16>(get_address(dst_offset + (x * 2) + (y * out_pitch), dst_dma, HERE));
-					const auto src = vm::_ptr<const u32>(get_address(src_offset, CELL_GCM_LOCATION_MAIN, HERE));
+					const auto dst_address = get_address(dst_offset + (x * 2) + (y * out_pitch), dst_dma, HERE);
+					const auto src_address = get_address(src_offset, CELL_GCM_LOCATION_MAIN, HERE);
+					const auto dst = vm::_ptr<u16>(dst_address);
+					const auto src = vm::_ptr<const u32>(src_address);
+
+					const auto data_length = count * 2;
+					auto res = rsx::reservation_lock<true>(dst_address, data_length, src_address, data_length);
 
 					auto convert = [](u32 input) -> u16
 					{
@@ -960,11 +1024,6 @@ namespace rsx
 
 			const f32 scale_x = method_registers.blit_engine_ds_dx();
 			const f32 scale_y = method_registers.blit_engine_dt_dy();
-
-			// NOTE: Do not round these value up!
-			// Sub-pixel offsets are used to signify pixel centers and do not mean to read from the next block (fill convention)
-			auto in_x = static_cast<u16>(std::floor(method_registers.blit_engine_in_x()));
-			auto in_y = static_cast<u16>(std::floor(method_registers.blit_engine_in_y()));
 
 			// Clipping
 			// Validate that clipping rect will fit onto both src and dst regions
@@ -1049,24 +1108,37 @@ namespace rsx
 				out_pitch = out_bpp * out_w;
 			}
 
-			if (in_x == 1 || in_y == 1) [[unlikely]]
+			if (in_bpp != out_bpp)
 			{
-				if (is_block_transfer && in_bpp == out_bpp)
-				{
-					// No scaling factor, so size in src == size in dst
-					// Check for texel wrapping where (offset + size) > size by 1 pixel
-					// TODO: Should properly RE this behaviour when I have time (kd-11)
-					if (in_x == 1 && in_w == clip_w) in_x = 0;
-					if (in_y == 1 && in_h == clip_h) in_y = 0;
-				}
-				else
-				{
-					// Graphics operation, ignore subpixel correction offsets
-					if (in_x == 1) in_x = 0;
-					if (in_y == 1) in_y = 0;
+				is_block_transfer = false;
+			}
 
-					is_block_transfer = false;
-				}
+			u16 in_x, in_y;
+			if (in_origin == blit_engine::transfer_origin::center)
+			{
+				// Convert to normal u,v addressing. Under this scheme offset of 1 is actually half-way inside pixel 0
+				const float x = std::max(method_registers.blit_engine_in_x(), 0.5f);
+				const float y = std::max(method_registers.blit_engine_in_y(), 0.5f);
+				in_x = static_cast<u16>(std::floor(x - 0.5f));
+				in_y = static_cast<u16>(std::floor(y - 0.5f));
+			}
+			else
+			{
+				in_x = static_cast<u16>(std::floor(method_registers.blit_engine_in_x()));
+				in_y = static_cast<u16>(std::floor(method_registers.blit_engine_in_y()));
+			}
+
+			// Check for subpixel addressing
+			if (scale_x < 1.f)
+			{
+				float dst_x = in_x * scale_x;
+				in_x = static_cast<u16>(std::floor(dst_x) / scale_x);
+			}
+
+			if (scale_y < 1.f)
+			{
+				float dst_y = in_y * scale_y;
+				in_y = static_cast<u16>(std::floor(dst_y) / scale_y);
 			}
 
 			const u32 in_offset = in_x * in_bpp + in_pitch * in_y;
@@ -1076,8 +1148,6 @@ namespace rsx
 			const u32 dst_address = get_address(dst_offset, dst_dma, HERE);
 
 			const u32 src_line_length = (in_w * in_bpp);
-
-			//auto res = vm::passive_lock(dst_address, dst_address + (in_pitch * (in_h - 1) + src_line_length));
 
 			if (is_block_transfer && (clip_h == 1 || (in_pitch == out_pitch && src_line_length == in_pitch)))
 			{
@@ -1137,6 +1207,9 @@ namespace rsx
 					method_registers.blit_engine_ds_dx(), method_registers.blit_engine_dt_dy());
 				return;
 			}
+
+			// Lock here. RSX cannot execute any locking operations from this point, including ZCULL read barriers
+			auto res = ::rsx::reservation_lock<true>(dst_address, out_pitch * out_h, src_address, in_pitch * in_h);
 
 			if (!g_cfg.video.force_cpu_blit_processing && (dst_dma == CELL_GCM_CONTEXT_DMA_MEMORY_FRAME_BUFFER || src_dma == CELL_GCM_CONTEXT_DMA_MEMORY_FRAME_BUFFER))
 			{
@@ -1437,29 +1510,30 @@ namespace rsx
 			const bool is_block_transfer = (in_pitch == out_pitch && out_pitch + 0u == line_length);
 			const auto read_address = get_address(src_offset, src_dma, HERE);
 			const auto write_address = get_address(dst_offset, dst_dma, HERE);
-			const auto data_length = in_pitch * (line_count - 1) + line_length;
+			const auto read_length = in_pitch * (line_count - 1) + line_length;
+			const auto write_length = out_pitch * (line_count - 1) + line_length;
 
-			rsx->invalidate_fragment_program(dst_dma, dst_offset, data_length);
-	
-			if (const auto result = rsx->read_barrier(read_address, data_length, !is_block_transfer);
+			rsx->invalidate_fragment_program(dst_dma, dst_offset, write_length);
+
+			if (const auto result = rsx->read_barrier(read_address, read_length, !is_block_transfer);
 				result == rsx::result_zcull_intr)
 			{
 				// This transfer overlaps will zcull data pool
-				if (rsx->copy_zcull_stats(read_address, data_length, write_address) == data_length)
+				if (rsx->copy_zcull_stats(read_address, read_length, write_address) == write_length)
 				{
 					// All writes deferred
 					return;
 				}
 			}
 
-			//auto res = vm::passive_lock(write_address, data_length + write_address);
+			auto res = ::rsx::reservation_lock<true>(write_address, write_length, read_address, read_length);
 
 			u8 *dst = vm::_ptr<u8>(write_address);
 			const u8 *src = vm::_ptr<u8>(read_address);
 
 			const bool is_overlapping = dst_dma == src_dma && [&]() -> bool
 			{
-				const u32 src_max = src_offset + data_length;
+				const u32 src_max = src_offset + read_length;
 				const u32 dst_max = dst_offset + (out_pitch * (line_count - 1) + line_length);
 				return (src_offset >= dst_offset && src_offset < dst_max) ||
 				 (dst_offset >= src_offset && dst_offset < src_max);
@@ -1469,7 +1543,7 @@ namespace rsx
 			{
 				if (is_block_transfer)
 				{
-					std::memmove(dst, src, line_length * line_count);
+					std::memmove(dst, src, read_length);
 				}
 				else
 				{
@@ -1497,7 +1571,7 @@ namespace rsx
 			{
 				if (is_block_transfer)
 				{
-					std::memcpy(dst, src, line_length * line_count);
+					std::memcpy(dst, src, read_length);
 				}
 				else
 				{
@@ -3065,6 +3139,16 @@ namespace rsx
 		bind<NV4097_SET_DEPTH_MASK, nv4097::set_surface_options_dirty_bit>();
 		bind<NV4097_SET_COLOR_MASK, nv4097::set_surface_options_dirty_bit>();
 		bind<NV4097_SET_COLOR_MASK_MRT, nv4097::set_surface_options_dirty_bit>();
+		bind<NV4097_SET_TWO_SIDED_STENCIL_TEST_ENABLE, nv4097::set_surface_options_dirty_bit>();
+		bind<NV4097_SET_STENCIL_TEST_ENABLE, nv4097::set_surface_options_dirty_bit>();
+		bind<NV4097_SET_STENCIL_MASK, nv4097::set_surface_options_dirty_bit>();
+		bind<NV4097_SET_STENCIL_OP_ZPASS, nv4097::set_stencil_op>();
+		bind<NV4097_SET_STENCIL_OP_FAIL, nv4097::set_stencil_op>();
+		bind<NV4097_SET_STENCIL_OP_ZFAIL, nv4097::set_stencil_op>();
+		bind<NV4097_SET_BACK_STENCIL_MASK, nv4097::set_surface_options_dirty_bit>();
+		bind<NV4097_SET_BACK_STENCIL_OP_ZPASS, nv4097::set_stencil_op>();
+		bind<NV4097_SET_BACK_STENCIL_OP_FAIL, nv4097::set_stencil_op>();
+		bind<NV4097_SET_BACK_STENCIL_OP_ZFAIL, nv4097::set_stencil_op>();
 		bind<NV4097_WAIT_FOR_IDLE, nv4097::sync>();
 		bind<NV4097_INVALIDATE_L2, nv4097::set_shader_program_dirty>();
 		bind<NV4097_SET_SHADER_PROGRAM, nv4097::set_shader_program_dirty>();
@@ -3074,8 +3158,8 @@ namespace rsx
 		bind<NV4097_SET_VERTEX_DATA_BASE_INDEX, nv4097::set_index_base_offset>();
 		bind<NV4097_SET_USER_CLIP_PLANE_CONTROL, nv4097::notify_state_changed<vertex_state_dirty>>();
 		bind<NV4097_SET_TRANSFORM_BRANCH_BITS, nv4097::notify_state_changed<vertex_state_dirty>>();
-		bind<NV4097_SET_CLIP_MIN, nv4097::notify_state_changed<vertex_state_dirty>>();
-		bind<NV4097_SET_CLIP_MAX, nv4097::notify_state_changed<vertex_state_dirty>>();
+		bind<NV4097_SET_CLIP_MIN, nv4097::notify_state_changed<invalidate_zclip_bits>>();
+		bind<NV4097_SET_CLIP_MAX, nv4097::notify_state_changed<invalidate_zclip_bits>>();
 		bind<NV4097_SET_POINT_SIZE, nv4097::notify_state_changed<vertex_state_dirty>>();
 		bind<NV4097_SET_ALPHA_FUNC, nv4097::notify_state_changed<fragment_state_dirty>>();
 		bind<NV4097_SET_ALPHA_REF, nv4097::notify_state_changed<fragment_state_dirty>>();
@@ -3089,10 +3173,14 @@ namespace rsx
 		bind<NV4097_SET_VIEWPORT_HORIZONTAL, nv4097::notify_state_changed<scissor_config_state_dirty>>();
 		bind<NV4097_SET_VIEWPORT_VERTICAL, nv4097::notify_state_changed<scissor_config_state_dirty>>();
 		bind_array<NV4097_SET_FOG_PARAMS, 1, 2, nv4097::notify_state_changed<fragment_state_dirty>>();
-		bind_range<NV4097_SET_VIEWPORT_SCALE, 1, 3, nv4097::set_viewport_dirty_bit>();
-		bind_range<NV4097_SET_VIEWPORT_OFFSET, 1, 3, nv4097::set_viewport_dirty_bit>();
+		bind_array<NV4097_SET_VIEWPORT_SCALE, 1, 3, nv4097::notify_state_changed<vertex_state_dirty>>();
+		bind_array<NV4097_SET_VIEWPORT_OFFSET, 1, 3, nv4097::notify_state_changed<vertex_state_dirty>>();
 		bind<NV4097_SET_INDEX_ARRAY_DMA, nv4097::check_index_array_dma>();
 		bind<NV4097_SET_BLEND_EQUATION, nv4097::set_blend_equation>();
+		bind<NV4097_SET_BLEND_FUNC_SFACTOR, nv4097::set_blend_factor>();
+		bind<NV4097_SET_BLEND_FUNC_DFACTOR, nv4097::set_blend_factor>();
+		bind<NV4097_SET_POLYGON_STIPPLE, nv4097::notify_state_changed<fragment_state_dirty>>();
+		bind_array<NV4097_SET_POLYGON_STIPPLE_PATTERN, 1, 32, nv4097::notify_state_changed<polygon_stipple_pattern_dirty>>();
 
 		//NV308A (0xa400..0xbffc!)
 		bind_range<NV308A_COLOR + (256 * 0), 1, 256, nv308a::color, 256 * 0>();

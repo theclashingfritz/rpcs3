@@ -120,12 +120,13 @@ namespace vk
 			shader_stages[1].module = m_fragment_shader.get_handle();
 			shader_stages[1].pName = "main";
 
-			VkDynamicState dynamic_state_descriptors[VK_DYNAMIC_STATE_RANGE_SIZE] = {};
+			std::vector<VkDynamicState> dynamic_state_descriptors;
 			VkPipelineDynamicStateCreateInfo dynamic_state_info = {};
 			dynamic_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-			dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_VIEWPORT;
-			dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_SCISSOR;
-			dynamic_state_info.pDynamicStates = dynamic_state_descriptors;
+			dynamic_state_descriptors.push_back(VK_DYNAMIC_STATE_VIEWPORT);
+			dynamic_state_descriptors.push_back(VK_DYNAMIC_STATE_SCISSOR);
+			dynamic_state_info.pDynamicStates = dynamic_state_descriptors.data();
+			dynamic_state_info.dynamicStateCount = ::size32(dynamic_state_descriptors);
 
 			VkVertexInputAttributeDescription vdesc;
 			VkVertexInputBindingDescription vbind;
@@ -196,7 +197,7 @@ namespace vk
 			CHECK_RESULT(vkCreateGraphicsPipelines(dev, nullptr, 1, &info, NULL, &pipeline));
 
 			const std::vector<vk::glsl::program_input> unused;
-			m_program = std::make_unique<vk::glsl::program>(static_cast<VkDevice>(dev), pipeline, unused, unused);
+			m_program = std::make_unique<vk::glsl::program>(static_cast<VkDevice>(dev), pipeline, m_pipeline_layout, unused, unused);
 		}
 
 		void load_program(vk::command_buffer &cmd, float scale_x, float scale_y, const float *offsets, size_t nb_offsets, std::array<float, 4> color)

@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "VKGSRender.h"
 #include "../Common/BufferUtils.h"
 
@@ -108,15 +108,27 @@ void VKGSRender::update_draw_state()
 
 	if (m_device->get_depth_bounds_support())
 	{
+		f32 bounds_min, bounds_max;
 		if (rsx::method_registers.depth_bounds_test_enabled())
 		{
-			//Update depth bounds min/max
-			vkCmdSetDepthBounds(*m_current_command_buffer, rsx::method_registers.depth_bounds_min(), rsx::method_registers.depth_bounds_max());
+			// Update depth bounds min/max
+			bounds_min = rsx::method_registers.depth_bounds_min();
+			bounds_max = rsx::method_registers.depth_bounds_max();
 		}
 		else
 		{
-			vkCmdSetDepthBounds(*m_current_command_buffer, 0.f, 1.f);
+			// Avoid special case where min=max and depth bounds (incorrectly) fails
+			bounds_min = std::min(0.f, rsx::method_registers.clip_min());
+			bounds_max = std::max(1.f, rsx::method_registers.clip_max());
 		}
+
+		if (!m_device->get_unrestricted_depth_range_support())
+		{
+			bounds_min = std::clamp(bounds_min, 0.f, 1.f);
+			bounds_max = std::clamp(bounds_max, 0.f, 1.f);
+		}
+
+		vkCmdSetDepthBounds(*m_current_command_buffer, bounds_min, bounds_max);
 	}
 
 	bind_viewport();
@@ -172,24 +184,13 @@ void VKGSRender::load_texture_env()
 
 				if (texture_format >= CELL_GCM_TEXTURE_DEPTH24_D8 && texture_format <= CELL_GCM_TEXTURE_DEPTH16_FLOAT)
 				{
-					if (m_device->get_formats_support().d24_unorm_s8)
-					{
-						// NOTE:
-						// The nvidia-specific format D24S8 has a special way of doing depth comparison that matches the PS3
-						// In case of projected shadow lookup the result of the divide operation has its Z clamped to [0-1] before comparison
-						// Most other wide formats (Z bits > 16) do not behave this way and depth greater than 1 is possible due to the use of floating point as storage
-						// Compare operations for these formats (such as D32_SFLOAT) are therefore emulated for correct results
-
-						// NOTE2:
-						// To improve reusability, DEPTH16 shadow ops are also emulated if D24S8 support is not available
-
-						compare_enabled = VK_TRUE;
-						depth_compare_mode = vk::get_compare_func(rsx::method_registers.fragment_textures[i].zfunc(), true);
-					}
+					compare_enabled = VK_TRUE;
+					depth_compare_mode = vk::get_compare_func(rsx::method_registers.fragment_textures[i].zfunc(), true);
 				}
 
-				const bool aniso_override = !g_cfg.video.strict_rendering_mode && g_cfg.video.anisotropic_level_override > 0;
-				const f32 af_level = aniso_override ? g_cfg.video.anisotropic_level_override : vk::max_aniso(rsx::method_registers.fragment_textures[i].max_aniso());
+				const int aniso_override_level = g_cfg.video.anisotropic_level_override;
+				const bool aniso_override = !g_cfg.video.strict_rendering_mode && aniso_override_level > 0;
+				const f32 af_level = aniso_override ? aniso_override_level : vk::max_aniso(rsx::method_registers.fragment_textures[i].max_aniso());
 				const auto wrap_s = vk::vk_wrap_mode(rsx::method_registers.fragment_textures[i].wrap_s());
 				const auto wrap_t = vk::vk_wrap_mode(rsx::method_registers.fragment_textures[i].wrap_t());
 				const auto wrap_r = vk::vk_wrap_mode(rsx::method_registers.fragment_textures[i].wrap_r());
@@ -197,7 +198,7 @@ void VKGSRender::load_texture_env()
 
 				// Check if non-point filtering can even be used on this format
 				bool can_sample_linear;
-				if (sampler_state->format_class == rsx::format_type::color) [[likely]]
+				if (sampler_state->format_class == RSX_FORMAT_CLASS_COLOR) [[likely]]
 				{
 					// Most PS3-like formats can be linearly filtered without problem
 					can_sample_linear = true;
@@ -570,6 +571,121 @@ void VKGSRender::bind_texture_env()
 	}
 }
 
+void VKGSRender::bind_interpreter_texture_env()
+{
+	if (current_fp_metadata.referenced_textures_mask == 0)
+	{
+		// Nothing to do
+		return;
+	}
+
+	std::array<VkDescriptorImageInfo, 68> texture_env;
+	VkDescriptorImageInfo fallback = { vk::null_sampler(), vk::null_image_view(*m_current_command_buffer, VK_IMAGE_VIEW_TYPE_1D)->value, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
+	auto start = texture_env.begin();
+	auto end = start;
+
+	// Fill default values
+	// 1D
+	std::advance(end, 16);
+	std::fill(start, end, fallback);
+	// 2D
+	start = end;
+	fallback.imageView = vk::null_image_view(*m_current_command_buffer, VK_IMAGE_VIEW_TYPE_2D)->value;
+	std::advance(end, 16);
+	std::fill(start, end, fallback);
+	// 3D
+	start = end;
+	fallback.imageView = vk::null_image_view(*m_current_command_buffer, VK_IMAGE_VIEW_TYPE_3D)->value;
+	std::advance(end, 16);
+	std::fill(start, end, fallback);
+	// CUBE
+	start = end;
+	fallback.imageView = vk::null_image_view(*m_current_command_buffer, VK_IMAGE_VIEW_TYPE_CUBE)->value;
+	std::advance(end, 16);
+	std::fill(start, end, fallback);
+
+	for (int i = 0; i < rsx::limits::fragment_textures_count; ++i)
+	{
+		if (current_fp_metadata.referenced_textures_mask & (1 << i))
+		{
+			vk::image_view* view = nullptr;
+			auto sampler_state = static_cast<vk::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
+
+			if (rsx::method_registers.fragment_textures[i].enabled() &&
+				sampler_state->validate())
+			{
+				if (view = sampler_state->image_handle; !view)
+				{
+					//Requires update, copy subresource
+					view = m_texture_cache.create_temporary_subresource(*m_current_command_buffer, sampler_state->external_subresource_desc);
+				}
+				else
+				{
+					switch (auto raw = view->image(); raw->current_layout)
+					{
+					default:
+						//case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+						break;
+					case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+						verify(HERE), sampler_state->upload_context == rsx::texture_upload_context::blit_engine_dst;
+						raw->change_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+						break;
+					case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+						verify(HERE), sampler_state->upload_context == rsx::texture_upload_context::blit_engine_src;
+						raw->change_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+						break;
+					case VK_IMAGE_LAYOUT_GENERAL:
+						verify(HERE), sampler_state->upload_context == rsx::texture_upload_context::framebuffer_storage;
+						if (!sampler_state->is_cyclic_reference)
+						{
+							// This was used in a cyclic ref before, but is missing a barrier
+							// No need for a full stall, use a custom barrier instead
+							VkPipelineStageFlags src_stage;
+							VkAccessFlags src_access;
+							if (raw->aspect() == VK_IMAGE_ASPECT_COLOR_BIT)
+							{
+								src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+								src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+							}
+							else
+							{
+								src_stage = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+								src_access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+							}
+
+							vk::insert_image_memory_barrier(
+								*m_current_command_buffer,
+								raw->value,
+								VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+								src_stage, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+								src_access, VK_ACCESS_SHADER_READ_BIT,
+								{ raw->aspect(), 0, 1, 0, 1 });
+
+							raw->current_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+						}
+						break;
+					case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+					case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+						verify(HERE), sampler_state->upload_context == rsx::texture_upload_context::framebuffer_storage, !sampler_state->is_cyclic_reference;
+						raw->change_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+						break;
+					}
+				}
+			}
+
+			if (view)
+			{
+				const int offsets[] = { 0, 16, 48, 32 };
+				auto& sampled_image_info = texture_env[offsets[static_cast<u32>(sampler_state->image_type)] + i];
+				sampled_image_info = { fs_sampler_handles[i]->value, view->value, view->image()->current_layout };
+			}
+		}
+	}
+
+	m_shader_interpreter.update_fragment_textures(texture_env, m_current_frame->descriptor_set);
+}
+
 void VKGSRender::emit_geometry(u32 sub_index)
 {
 	auto &draw_call = rsx::method_registers.current_draw_clause;
@@ -700,7 +816,7 @@ void VKGSRender::emit_geometry(u32 sub_index)
 	}
 
 	// Bind the new set of descriptors for use with this draw call
-	vkCmdBindDescriptorSets(*m_current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &m_current_frame->descriptor_set, 0, nullptr);
+	vkCmdBindDescriptorSets(*m_current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_program->pipeline_layout, 0, 1, &m_current_frame->descriptor_set, 0, nullptr);
 
 	m_frame_stats.setup_time += m_profiler.duration();
 
@@ -792,52 +908,6 @@ void VKGSRender::end()
 
 	m_profiler.start();
 
-	// Check for data casts
-	// NOTE: This is deprecated and will be removed soon. The memory barrier invoked before rendering does this better
-	auto ds = std::get<1>(m_rtts.m_bound_depth_stencil);
-	if (ds && ds->old_contents.size() == 1 &&
-		ds->old_contents[0].source->info.format == VK_FORMAT_B8G8R8A8_UNORM)
-	{
-		auto key = vk::get_renderpass_key(ds->info.format);
-		auto render_pass = vk::get_renderpass(*m_device, key);
-		verify("Usupported renderpass configuration" HERE), render_pass != VK_NULL_HANDLE;
-
-		VkClearDepthStencilValue clear = { 1.f, 0xFF };
-		VkImageSubresourceRange range = { VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1 };
-
-		// Initialize source
-		auto src = vk::as_rtt(ds->old_contents[0].source);
-		src->read_barrier(*m_current_command_buffer);
-
-		switch (src->current_layout)
-		{
-		case VK_IMAGE_LAYOUT_GENERAL:
-		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-			break;
-		//case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-		default:
-			src->change_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-			break;
-		}
-
-		// Clear explicitly before starting the inheritance transfer
-		const bool preinitialized = (ds->current_layout == VK_IMAGE_LAYOUT_GENERAL);
-		if (!preinitialized) ds->push_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		vkCmdClearDepthStencilImage(*m_current_command_buffer, ds->value, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);
-		if (!preinitialized) ds->pop_layout(*m_current_command_buffer);
-
-		// TODO: Stencil transfer
-		ds->old_contents[0].init_transfer(ds);
-		m_depth_converter->run(*m_current_command_buffer,
-			ds->old_contents[0].src_rect(),
-			ds->old_contents[0].dst_rect(),
-			src->get_view(0xAAE4, rsx::default_remap_vector),
-			ds, render_pass);
-
-		// TODO: Flush management to avoid pass running out of ubo space (very unlikely)
-		ds->on_write();
-	}
-
 	load_texture_env();
 	m_frame_stats.textures_upload_time += m_profiler.duration();
 
@@ -859,20 +929,28 @@ void VKGSRender::end()
 	load_program_env();
 	m_frame_stats.setup_time += m_profiler.duration();
 
-	bind_texture_env();
+	if (!m_shader_interpreter.is_interpreter(m_program)) [[likely]]
+	{
+		bind_texture_env();
+	}
+	else
+	{
+		bind_interpreter_texture_env();
+	}
+
 	m_texture_cache.release_uncached_temporary_subresources();
 	m_frame_stats.textures_upload_time += m_profiler.duration();
 
 	if (m_current_command_buffer->flags & vk::command_buffer::cb_load_occluson_task)
 	{
-		u32 occlusion_id = m_occlusion_query_pool.find_free_slot();
+		u32 occlusion_id = m_occlusion_query_manager->allocate_query(*m_current_command_buffer);
 		if (occlusion_id == UINT32_MAX)
 		{
 			// Force flush
 			rsx_log.error("[Performance Warning] Out of free occlusion slots. Forcing hard sync.");
 			ZCULL_control::sync(this);
 
-			occlusion_id = m_occlusion_query_pool.find_free_slot();
+			occlusion_id = m_occlusion_query_manager->allocate_query(*m_current_command_buffer);
 			if (occlusion_id == UINT32_MAX)
 			{
 				//rsx_log.error("Occlusion pool overflow");
@@ -881,7 +959,7 @@ void VKGSRender::end()
 		}
 
 		// Begin query
-		m_occlusion_query_pool.begin_query(*m_current_command_buffer, occlusion_id);
+		m_occlusion_query_manager->begin_query(*m_current_command_buffer, occlusion_id);
 
 		auto &data = m_occlusion_map[m_active_query_info->driver_handle];
 		data.indices.push_back(occlusion_id);
@@ -895,7 +973,7 @@ void VKGSRender::end()
 	vk::get_appropriate_topology(rsx::method_registers.current_draw_clause.primitive, primitive_emulated);
 
 	// Apply write memory barriers
-	if (ds) ds->write_barrier(*m_current_command_buffer);
+	if (auto ds = std::get<1>(m_rtts.m_bound_depth_stencil)) ds->write_barrier(*m_current_command_buffer);
 
 	for (auto &rtt : m_rtts.m_bound_render_targets)
 	{

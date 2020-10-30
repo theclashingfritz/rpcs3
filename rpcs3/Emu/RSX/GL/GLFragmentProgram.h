@@ -2,14 +2,22 @@
 #include "../Common/FragmentProgramDecompiler.h"
 #include "../Common/GLSLTypes.h"
 #include "Emu/RSX/RSXFragmentProgram.h"
+#include "GLHelpers.h"
 
 namespace glsl
 {
 	struct shader_properties;
 }
 
+namespace gl
+{
+	class shader_interpreter;
+}
+
 struct GLFragmentDecompilerThread : public FragmentProgramDecompiler
 {
+	friend class gl::shader_interpreter;
+
 	std::string& m_shader;
 	ParamArray& m_parrDummy;
 	glsl::shader_properties m_shader_props{};
@@ -49,8 +57,8 @@ public:
 	~GLFragmentProgram();
 
 	ParamArray parr;
-	u32 id = 0;
-	std::string shader;
+	u32 id;
+	gl::glsl::shader shader;
 	std::vector<size_t> FragmentConstantOffsetCache;
 
 	/**

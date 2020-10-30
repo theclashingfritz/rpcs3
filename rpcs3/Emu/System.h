@@ -8,6 +8,9 @@
 u64 get_system_time();
 u64 get_guest_system_time();
 
+enum class localized_string_id;
+enum class video_renderer;
+
 enum class system_state
 {
 	running,
@@ -37,9 +40,7 @@ struct EmuCallbacks
 	std::function<void()> on_resume;
 	std::function<void()> on_stop;
 	std::function<void()> on_ready;
-	std::function<void(bool)> exit; // (force_quit) close RPCS3
-	std::function<void(const std::string&)> reset_pads;
-	std::function<void(bool)> enable_pads;
+	std::function<bool(bool)> exit; // (force_quit) close RPCS3
 	std::function<void(s32, s32)> handle_taskbar_progress; // (type, value) type: 0 for reset, 1 for increment, 2 for set_limit
 	std::function<void()> init_kb_handler;
 	std::function<void()> init_mouse_handler;
@@ -51,6 +52,8 @@ struct EmuCallbacks
 	std::function<std::shared_ptr<class OskDialogBase>()> get_osk_dialog;
 	std::function<std::unique_ptr<class SaveDialogBase>()> get_save_dialog;
 	std::function<std::unique_ptr<class TrophyNotificationBase>()> get_trophy_notification_dialog;
+	std::function<std::string(localized_string_id, const char*)> get_localized_string;
+	std::function<std::u32string(localized_string_id, const char*)> get_localized_u32string;
 };
 
 class Emulator final
@@ -59,13 +62,18 @@ class Emulator final
 
 	EmuCallbacks m_cb;
 
-	atomic_t<u64> m_pause_start_time; // set when paused
-	atomic_t<u64> m_pause_amend_time; // increased when resumed
+	atomic_t<u64> m_pause_start_time{0}; // set when paused
+	atomic_t<u64> m_pause_amend_time{0}; // increased when resumed
 
+	video_renderer m_default_renderer;
+	std::string m_default_graphics_adapter;
+
+	std::string m_config_override_path;
 	std::string m_path;
 	std::string m_path_old;
 	std::string m_title_id;
 	std::string m_title;
+	std::string m_app_version;
 	std::string m_cat;
 	std::string m_dir;
 	std::string m_sfo_dir;
@@ -133,6 +141,11 @@ public:
 		return m_title + (m_title_id.empty() ? "" : " [" + m_title_id + "]");
 	}
 
+	const std::string& GetAppVersion() const
+	{
+		return m_app_version;
+	}
+
 	const std::string& GetCat() const
 	{
 		return m_cat;
@@ -182,6 +195,7 @@ public:
 	static std::string GetEmuDir();
 	static std::string GetHddDir();
 	static std::string GetHdd1Dir();
+	static std::string GetCacheDir();
 	static std::string GetSfoDirFromGamePath(const std::string& game_path, const std::string& user, const std::string& title_id = "");
 
 	static std::string GetCustomConfigDir();
@@ -197,6 +211,7 @@ public:
 	void Resume();
 	void Stop(bool restart = false);
 	void Restart() { Stop(true); }
+	bool Quit(bool force_quit);
 
 	bool IsRunning() const { return m_state == system_state::running; }
 	bool IsPaused()  const { return m_state == system_state::paused; }
@@ -207,11 +222,16 @@ public:
 	bool HasGui() const { return m_has_gui; }
 	void SetHasGui(bool has_gui) { m_has_gui = has_gui; }
 
+	void SetDefaultRenderer(video_renderer renderer) { m_default_renderer = renderer; }
+	void SetDefaultGraphicsAdapter(std::string adapter) { m_default_graphics_adapter = std::move(adapter); }
+	void SetConfigOverride(std::string path) { m_config_override_path = std::move(path); }
+
 	std::string GetFormattedTitle(double fps) const;
 
 	u32 GetMaxThreads() const;
 
 	void ConfigureLogs();
+	void ConfigurePPUCache();
 
 private:
 	void LimitCacheSize();

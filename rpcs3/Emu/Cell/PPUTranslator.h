@@ -52,14 +52,16 @@ class PPUTranslator final : public cpu_translator
 
 	llvm::Value* m_mtocr_table{};
 
-	llvm::Value* m_globals[173];
+	llvm::Value* m_globals[175];
 	llvm::Value** const m_g_cr = m_globals + 99;
-	llvm::Value* m_locals[173];
+	llvm::Value* m_locals[175];
 	llvm::Value** const m_gpr = m_locals + 3;
 	llvm::Value** const m_fpr = m_locals + 35;
 	llvm::Value** const m_vr = m_locals + 67;
 	llvm::Value** const m_cr = m_locals + 99;
 	llvm::Value** const m_fc = m_locals + 131; // FPSCR bits (used partially)
+
+	llvm::Value* nan_vec4;
 
 #define DEF_VALUE(loc, glb, pos)\
 	llvm::Value*& loc = m_locals[pos];\
@@ -75,6 +77,7 @@ class PPUTranslator final : public cpu_translator
 	DEF_VALUE(m_cnt, m_g_cnt, 170) // XER.CNT
 	DEF_VALUE(m_sat, m_g_sat, 171) // VSCR.SAT bit, sticky saturation flag
 	DEF_VALUE(m_nj, m_g_nj, 172) // VSCR.NJ bit, non-Java mode
+	DEF_VALUE(m_jm_mask, m_g_jm_mask, 174) // Java-Mode helper mask
 
 #undef DEF_VALUE
 public:
@@ -96,7 +99,19 @@ public:
 	template <typename T>
 	void set_vr(u32 vr, T&& expr)
 	{
-		return SetVr(vr, expr.eval(m_ir));
+		SetVr(vr, expr.eval(m_ir));
+	}
+
+	llvm::Value* VecHandleNan(llvm::Value* val);
+	llvm::Value* VecHandleDenormal(llvm::Value* val);
+	llvm::Value* VecHandleResult(llvm::Value* val);
+
+	template <typename T>
+	auto vec_handle_result(T&& expr)
+	{
+		value_t<typename T::type> result;
+		result.value = VecHandleResult(expr.eval(m_ir));
+		return result;
 	}
 
 	// Get current instruction address
@@ -315,7 +330,7 @@ public:
 	// Handle compilation errors
 	void CompilationError(const std::string& error);
 
-	PPUTranslator(llvm::LLVMContext& context, llvm::Module* module, const ppu_module& info, llvm::ExecutionEngine& engine);
+	PPUTranslator(llvm::LLVMContext& context, llvm::Module* _module, const ppu_module& info, llvm::ExecutionEngine& engine);
 	~PPUTranslator();
 
 	// Get thread context struct type

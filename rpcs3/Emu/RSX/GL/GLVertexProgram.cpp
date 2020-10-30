@@ -4,7 +4,6 @@
 #include "Emu/System.h"
 
 #include "GLCommonDecompiler.h"
-#include "GLHelpers.h"
 #include "../Common/GLSLCommon.h"
 
 #include <algorithm>
@@ -46,7 +45,7 @@ void GLVertexDecompilerThread::insertHeader(std::stringstream &OS)
 	OS << "layout(std140, binding = 1) uniform VertexLayoutBuffer\n";
 	OS << "{\n";
 	OS << "	uint  vertex_base_index;\n";
-	OS << " uint  vertex_index_offset;\n";
+	OS << "	uint  vertex_index_offset;\n";
 	OS << "	uvec4 input_attributes_blob[16 / 2];\n";
 	OS << "};\n\n";
 }
@@ -125,6 +124,8 @@ void GLVertexDecompilerThread::insertMainStart(std::stringstream & OS)
 	glsl::shader_properties properties2{};
 	properties2.domain = glsl::glsl_vertex_program;
 	properties2.require_lit_emulation = properties.has_lit_op;
+	properties2.emulate_zclip_transform = true;
+	properties2.emulate_depth_clip_only = dev_caps.NV_depth_buffer_float_supported;
 
 	insert_glsl_legacy_function(OS, properties2);
 	glsl::insert_vertex_input_fetch(OS, glsl::glsl_rules_opengl4, dev_caps.vendor_INTEL == false);
@@ -267,55 +268,21 @@ GLVertexProgram::~GLVertexProgram()
 
 void GLVertexProgram::Decompile(const RSXVertexProgram& prog)
 {
-	GLVertexDecompilerThread decompiler(prog, shader, parr);
+	std::string source;
+	GLVertexDecompilerThread decompiler(prog, source, parr);
 	decompiler.Task();
+
+	shader.create(::glsl::program_domain::glsl_vertex_program, source);
 }
 
 void GLVertexProgram::Compile()
 {
-	if (id)
-	{
-		glDeleteShader(id);
-	}
-
-	id = glCreateShader(GL_VERTEX_SHADER);
-
-	const char* str = shader.c_str();
-	const int strlen = ::narrow<int>(shader.length());
-
-	if (g_cfg.video.log_programs)
-		fs::file(fs::get_cache_dir() + "shaderlog/VertexProgram" + std::to_string(id) + ".glsl", fs::rewrite).write(str);
-
-	glShaderSource(id, 1, &str, &strlen);
-	glCompileShader(id);
-
-	GLint r = GL_FALSE;
-	glGetShaderiv(id, GL_COMPILE_STATUS, &r);
-	if (r != GL_TRUE)
-	{
-		glGetShaderiv(id, GL_INFO_LOG_LENGTH, &r);
-
-		if (r)
-		{
-			char* buf = new char[r + 1]();
-			GLsizei len;
-			glGetShaderInfoLog(id, r, &len, buf);
-			rsx_log.error("Failed to compile vertex shader: %s", buf);
-			delete[] buf;
-		}
-
-		rsx_log.notice("%s", shader.c_str());
-		Emu.Pause();
-	}
+	shader.compile();
+	id = shader.id();
 }
 
 void GLVertexProgram::Delete()
 {
-	shader.clear();
-
-	if (id)
-	{
-		glDeleteShader(id);
-		id = 0;
-	}
+	shader.remove();
+	id = 0;
 }

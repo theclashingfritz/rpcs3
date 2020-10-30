@@ -1,6 +1,5 @@
 ﻿#include "atomic2.hpp"
 #include "Utilities/JIT.h"
-#include "Utilities/asm.h"
 #include "Utilities/sysinfo.h"
 
 //
@@ -212,11 +211,15 @@ static const auto commit_tx = build_function_asm<s32(*)(const stx::multi_cas_ite
 
 	// Transaction abort
 	c.bind(stop);
-	build_transaction_abort(c, 0xff);
+	c.xend();
+	c.xor_(x86::eax, x86::eax);
+	c.jmp(fall);
 
 	// Abort when there is still a chance of success
 	c.bind(wait);
-	build_transaction_abort(c, 0x00);
+	c.xend();
+	c.mov(x86::eax, 0xffu << 24);
+	c.jmp(fall);
 
 	// Transaction fallback: return zero
 	c.bind(fall);
@@ -265,7 +268,7 @@ static u64 rec_alloc()
 		if (ok)
 		{
 			// Find lowest clear bit
-			return group * 64 + utils::cnttz64(~bits, false);
+			return group * 64 + std::countr_one(bits);
 		}
 	}
 

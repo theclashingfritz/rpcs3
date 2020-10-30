@@ -130,7 +130,7 @@ void VKFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 
 			const auto mask = (1 << index);
 
-			if (!device_props.emulate_depth_compare && m_prog.shadow_textures & mask)
+			if (m_prog.shadow_textures & mask)
 			{
 				if (m_shadow_sampled_textures & mask)
 				{
@@ -206,6 +206,11 @@ void VKFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 	OS << "	sampler_info texture_parameters[16];\n";
 	OS << "};\n\n";
 
+	OS << "layout(std140, set = 0, binding = " << std::to_string(m_binding_table.rasterizer_env_bind_slot) << ") uniform RasterizerHeap\n";
+	OS << "{\n";
+	OS << "	uvec4 stipple_pattern[8];\n";
+	OS << "};\n\n";
+
 	vk::glsl::program_input in;
 	in.location = m_binding_table.fragment_constant_buffers_bind_slot;
 	in.domain = glsl::glsl_fragment_program;
@@ -220,6 +225,10 @@ void VKFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 	in.location = m_binding_table.fragment_texture_params_bind_slot;
 	in.name = "TextureParametersBuffer";
 	inputs.push_back(in);
+
+	in.location = m_binding_table.rasterizer_env_bind_slot;
+	in.name = "RasterizerHeap";
+	inputs.push_back(in);
 }
 
 void VKFragmentDecompilerThread::insertGlobalFunctions(std::stringstream &OS)
@@ -231,6 +240,7 @@ void VKFragmentDecompilerThread::insertGlobalFunctions(std::stringstream &OS)
 	m_shader_props.require_wpos = !!(properties.in_register_mask & in_wpos);
 	m_shader_props.require_texture_ops = properties.has_tex_op;
 	m_shader_props.require_shadow_ops = m_prog.shadow_textures != 0;
+	m_shader_props.require_texture_expand = properties.has_exp_tex_op;
 	m_shader_props.emulate_coverage_tests = g_cfg.video.antialiasing_level == msaa_level::none;
 	m_shader_props.emulate_shadow_compare = device_props.emulate_depth_compare;
 	m_shader_props.low_precision_tests = vk::get_driver_vendor() == vk::driver_vendor::NVIDIA;
@@ -332,6 +342,8 @@ void VKFragmentDecompilerThread::insertMainEnd(std::stringstream & OS)
 
 	OS << "void main()\n";
 	OS << "{\n";
+
+	::glsl::insert_rop_init(OS);
 
 	OS << "\n" << "	fs_main();\n\n";
 

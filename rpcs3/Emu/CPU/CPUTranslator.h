@@ -828,7 +828,7 @@ struct llvm_neg
 
 	static_assert(llvm_value_t<T>::is_sint || llvm_value_t<T>::is_uint || llvm_value_t<T>::is_float, "llvm_neg<>: invalid type");
 
-	static constexpr auto opc = llvm_value_t<T>::is_float ? llvm::Instruction::FSub : llvm::Instruction::Sub;
+	static constexpr auto opc = llvm_value_t<T>::is_float ? llvm::Instruction::FNeg : llvm::Instruction::Sub;
 
 	llvm::Value* eval(llvm::IRBuilder<>* ir) const
 	{
@@ -848,6 +848,19 @@ struct llvm_neg
 	llvm_match_tuple<A1> match(llvm::Value*& value) const
 	{
 		llvm::Value* v1 = {};
+
+		if constexpr (llvm_value_t<T>::is_float)
+		{
+			if (auto i = llvm::dyn_cast_or_null<llvm::UnaryOperator>(value); i && i->getOpcode() == opc)
+			{
+				v1 = i->getOperand(0);
+
+				if (auto r1 = a1.match(v1); v1)
+				{
+					return r1;
+				}
+			}
+		}
 
 		if (auto i = llvm::dyn_cast_or_null<llvm::BinaryOperator>(value); i && i->getOpcode() == opc)
 		{
@@ -996,8 +1009,8 @@ struct llvm_fshl
 
 	static llvm::Function* get_fshl(llvm::IRBuilder<>* ir)
 	{
-		const auto module = ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(module, llvm::Intrinsic::fshl, {llvm_value_t<T>::get_type(ir->getContext())});
+		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
+		return llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::fshl, {llvm_value_t<T>::get_type(ir->getContext())});
 	}
 
 	static llvm::Value* fold(llvm::IRBuilder<>* ir, llvm::Value* v1, llvm::Value* v2, llvm::Value* v3)
@@ -1068,8 +1081,8 @@ struct llvm_fshr
 
 	static llvm::Function* get_fshr(llvm::IRBuilder<>* ir)
 	{
-		const auto module = ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(module, llvm::Intrinsic::fshr, {llvm_value_t<T>::get_type(ir->getContext())});
+		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
+		return llvm::Intrinsic::getDeclaration(_module, llvm::Intrinsic::fshr, {llvm_value_t<T>::get_type(ir->getContext())});
 	}
 
 	static llvm::Value* fold(llvm::IRBuilder<>* ir, llvm::Value* v1, llvm::Value* v2, llvm::Value* v3)
@@ -1629,7 +1642,7 @@ struct llvm_bitcast
 	using type = U;
 
 	llvm_expr_t<A1> a1;
-	llvm::Module* module;
+	llvm::Module* _module;
 
 	static constexpr uint bitsize0 = llvm_value_t<T>::is_vector ? llvm_value_t<T>::is_vector * llvm_value_t<T>::esize : llvm_value_t<T>::esize;
 	static constexpr uint bitsize1 = llvm_value_t<U>::is_vector ? llvm_value_t<U>::is_vector * llvm_value_t<U>::esize : llvm_value_t<U>::esize;
@@ -1655,7 +1668,7 @@ struct llvm_bitcast
 
 		if (const auto c1 = llvm::dyn_cast<llvm::Constant>(v1))
 		{
-			const auto result = llvm::ConstantFoldCastOperand(llvm::Instruction::BitCast, c1, rt, module->getDataLayout());
+			const auto result = llvm::ConstantFoldCastOperand(llvm::Instruction::BitCast, c1, rt, _module->getDataLayout());
 
 			if (result)
 			{
@@ -1701,7 +1714,7 @@ struct llvm_bitcast
 			const auto target = llvm_value_t<T>::get_type(c->getContext());
 
 			// Reverse bitcast on a constant
-			if (llvm::Value* cv = llvm::ConstantFoldCastOperand(llvm::Instruction::BitCast, c, target, module->getDataLayout()))
+			if (llvm::Value* cv = llvm::ConstantFoldCastOperand(llvm::Instruction::BitCast, c, target, _module->getDataLayout()))
 			{
 				if (auto r1 = a1.match(cv); cv)
 				{
@@ -2016,8 +2029,8 @@ struct llvm_add_sat
 
 	static llvm::Function* get_add_sat(llvm::IRBuilder<>* ir)
 	{
-		const auto module = ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
+		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
+		return llvm::Intrinsic::getDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
 	}
 
 	llvm::Value* eval(llvm::IRBuilder<>* ir) const
@@ -2087,8 +2100,8 @@ struct llvm_sub_sat
 
 	static llvm::Function* get_sub_sat(llvm::IRBuilder<>* ir)
 	{
-		const auto module = ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
+		const auto _module = ir->GetInsertBlock()->getParent()->getParent();
+		return llvm::Intrinsic::getDeclaration(_module, intr, {llvm_value_t<T>::get_type(ir->getContext())});
 	}
 
 	llvm::Value* eval(llvm::IRBuilder<>* ir) const
@@ -2390,7 +2403,7 @@ struct llvm_shuffle2
 class cpu_translator
 {
 protected:
-	cpu_translator(llvm::Module* module, bool is_be);
+	cpu_translator(llvm::Module* _module, bool is_be);
 
 	// LLVM context
 	std::reference_wrapper<llvm::LLVMContext> m_context;
@@ -2409,6 +2422,9 @@ protected:
 
 	// Allow FMA
 	bool m_use_fma = false;
+
+	// Allow Icelake tier AVX-512 
+	bool m_use_avx512_icl = false;
 
 	// IR builder
 	llvm::IRBuilder<>* m_ir;
@@ -2682,8 +2698,8 @@ public:
 	template <typename... Types>
 	llvm::Function* get_intrinsic(llvm::Intrinsic::ID id)
 	{
-		const auto module = m_ir->GetInsertBlock()->getParent()->getParent();
-		return llvm::Intrinsic::getDeclaration(module, id, {get_type<Types>()...});
+		const auto _module = m_ir->GetInsertBlock()->getParent()->getParent();
+		return llvm::Intrinsic::getDeclaration(_module, id, {get_type<Types>()...});
 	}
 
 	template <typename T>
@@ -2731,19 +2747,83 @@ public:
 	}
 
 	// TODO: Support doubles
-	auto fre(value_t<f32[4]> a)
+	template <typename T, typename = std::enable_if_t<llvm_value_t<typename T::type>::esize == 32u && llvm_value_t<typename T::type>::is_float>>
+	auto fre(T a)
 	{
-		decltype(a) result;
+		value_t<typename T::type> result;
 		const auto av = a.eval(m_ir);
 		result.value  = m_ir->CreateCall(m_module->getOrInsertFunction("llvm.x86.sse.rcp.ps", av->getType(), av->getType()).getCallee(), {av});
 		return result;
 	}
 
-	auto frsqe(value_t<f32[4]> a)
+	template <typename T, typename = std::enable_if_t<llvm_value_t<typename T::type>::esize == 32u && llvm_value_t<typename T::type>::is_float>>
+	auto frsqe(T a)
 	{
-		decltype(a) result;
+		value_t<typename T::type> result;
 		const auto av = a.eval(m_ir);
 		result.value  = m_ir->CreateCall(m_module->getOrInsertFunction("llvm.x86.sse.rsqrt.ps", av->getType(), av->getType()).getCallee(), {av});
+		return result;
+	}
+
+	template <typename T, typename U, typename = std::enable_if_t<std::is_same_v<typename T::type, typename U::type> && llvm_value_t<typename T::type>::esize == 32u && llvm_value_t<typename T::type>::is_float>>
+	auto fmax(T a, U b)
+	{
+		value_t<typename T::type> result;
+		const auto av = a.eval(m_ir);
+		const auto bv = b.eval(m_ir);
+		result.value  = m_ir->CreateCall(m_module->getOrInsertFunction("llvm.x86.sse.max.ps", av->getType(), av->getType(), av->getType()).getCallee(), {av, bv});
+		return result;
+	}
+
+	template <typename T, typename U, typename = std::enable_if_t<std::is_same_v<typename T::type, typename U::type> && llvm_value_t<typename T::type>::esize == 32u && llvm_value_t<typename T::type>::is_float>>
+	auto fmin(T a, U b)
+	{
+		value_t<typename T::type> result;
+		const auto av = a.eval(m_ir);
+		const auto bv = b.eval(m_ir);
+		result.value  = m_ir->CreateCall(m_module->getOrInsertFunction("llvm.x86.sse.min.ps", av->getType(), av->getType(), av->getType()).getCallee(), {av, bv});
+		return result;
+	}
+
+	template <typename T1, typename T2>
+	value_t<u8[16]> gf2p8affineqb(T1 a, T2 b, u8 c)
+	{
+		value_t<u8[16]> result;
+
+		const auto data0 = a.eval(m_ir);
+		const auto data1 = b.eval(m_ir);
+
+		const auto immediate = (llvm_const_int<u8>{c});
+		const auto imm8 = immediate.eval(m_ir);
+
+		result.value = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::x86_vgf2p8affineqb_128), {data0, data1, imm8});
+		return result;
+	}
+
+	template <typename T1, typename T2, typename T3>
+	value_t<u8[16]> vperm2b(T1 a, T2 b, T3 c)
+	{
+		value_t<u8[16]> result;
+
+		const auto data0 = a.eval(m_ir);
+		const auto data1 = b.eval(m_ir);
+		const auto index = c.eval(m_ir);
+		const auto zeros = llvm::ConstantAggregateZero::get(get_type<u8[16]>());
+
+		if (auto c = llvm::dyn_cast<llvm::Constant>(index))
+		{
+			// Convert VPERM2B index back to LLVM vector shuffle mask
+			const auto cv = llvm::dyn_cast<llvm::ConstantDataVector>(c);
+
+			if (cv || llvm::isa<llvm::ConstantAggregateZero>(c))
+			{
+				result.value = m_ir->CreateZExt(cv, get_type<u32[16]>());
+				result.value = m_ir->CreateShuffleVector(data0, data1, result.value);
+				return result;
+			}
+		}
+
+		result.value = m_ir->CreateCall(get_intrinsic(llvm::Intrinsic::x86_avx512_vpermi2var_qi_128), {data0, index, data1});
 		return result;
 	}
 
@@ -2824,7 +2904,7 @@ public:
 	}
 
 	template <typename R = v128>
-	R get_const_vector(llvm::Constant*, u32 a, u32 b);
+	std::pair<bool, R> get_const_vector(llvm::Value*, u32 a, u32 b);
 
 	template <typename T = v128>
 	llvm::Constant* make_const_vector(T, llvm::Type*);

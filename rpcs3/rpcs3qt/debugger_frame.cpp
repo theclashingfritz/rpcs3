@@ -28,7 +28,6 @@
 #include <atomic>
 
 constexpr auto qstr = QString::fromStdString;
-extern std::atomic<bool> user_asked_for_frame_capture;
 
 debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *parent)
 	: custom_dock_widget(tr("Debugger"), parent), xgui_settings(settings)
@@ -69,7 +68,6 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 
 	m_go_to_addr = new QPushButton(tr("Go To Address"), this);
 	m_go_to_pc = new QPushButton(tr("Go To PC"), this);
-	m_btn_capture = new QPushButton(tr("RSX Capture"), this);
 	m_btn_step = new QPushButton(tr("Step"), this);
 	m_btn_step_over = new QPushButton(tr("Step Over"), this);
 	m_btn_run = new QPushButton(RunString, this);
@@ -80,7 +78,6 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 
 	hbox_b_main->addWidget(m_go_to_addr);
 	hbox_b_main->addWidget(m_go_to_pc);
-	hbox_b_main->addWidget(m_btn_capture);
 	hbox_b_main->addWidget(m_btn_step);
 	hbox_b_main->addWidget(m_btn_step_over);
 	hbox_b_main->addWidget(m_btn_run);
@@ -132,11 +129,6 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 	connect(m_go_to_addr, &QAbstractButton::clicked, this, &debugger_frame::ShowGotoAddressDialog);
 	connect(m_go_to_pc, &QAbstractButton::clicked, this, &debugger_frame::ShowPC);
 
-	connect(m_btn_capture, &QAbstractButton::clicked, [this]()
-	{
-		user_asked_for_frame_capture = true;
-	});
-
 	connect(m_btn_step, &QAbstractButton::clicked, this, &debugger_frame::DoStep);
 	connect(m_btn_step_over, &QAbstractButton::clicked, [this]() { DoStep(true); });
 
@@ -144,16 +136,13 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 	{
 		if (const auto cpu = this->cpu.lock())
 		{
-			if (m_btn_run->text() == RunString && cpu->state.test_and_reset(cpu_flag::dbg_pause))
+			// Alter dbg_pause bit state (disable->enable, enable->disable)
+			const auto old = cpu->state.xor_fetch(cpu_flag::dbg_pause);
+
+			// Notify only if no pause flags are set after this change
+			if (!(old & (cpu_flag::dbg_pause + cpu_flag::dbg_global_pause)))
 			{
-				if (!(cpu->state & (cpu_flag::dbg_pause + cpu_flag::dbg_global_pause)))
-				{
-					cpu->notify();
-				}
-			}
-			else
-			{
-				cpu->state += cpu_flag::dbg_pause;
+				cpu->notify();
 			}
 		}
 		UpdateUI();
@@ -240,10 +229,11 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 		return;
 	}
 
-	const u32 start_pc = m_debugger_list->m_pc - m_debugger_list->m_item_count * 4;
-	const u32 pc = start_pc + i * 4;
+	const u32 pc = m_debugger_list->m_pc + i * 4;
 
-	if (QApplication::keyboardModifiers() & Qt::ControlModifier)
+	const auto modifiers = QApplication::keyboardModifiers();
+
+	if (modifiers & Qt::ControlModifier)
 	{
 		switch (event->key())
 		{
@@ -270,7 +260,21 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 			dlg->show();
 			return;
 		}
+		case Qt::Key_S:
+		{
+			if (modifiers & Qt::AltModifier)
+			{
+				const auto cpu = this->cpu.lock();
 
+				if (!cpu || cpu->id_type() == 1)
+				{
+					return;
+				}
+
+				static_cast<spu_thread*>(cpu.get())->capture_local_storage();
+			}
+			return;
+		}
 		case Qt::Key_F10:
 		{
 			DoStep(true);
@@ -300,8 +304,6 @@ u32 debugger_frame::GetPc() const
 void debugger_frame::UpdateUI()
 {
 	UpdateUnitList();
-
-	m_btn_capture->setEnabled(Emu.IsRunning() || Emu.IsPaused());
 
 	if (m_no_thread_selected) return;
 
@@ -347,6 +349,8 @@ void debugger_frame::UpdateUI()
 	}
 }
 
+Q_DECLARE_METATYPE(std::weak_ptr<cpu_thread>);
+
 void debugger_frame::UpdateUnitList()
 {
 	const u64 threads_created = cpu_thread::g_threads_created;
@@ -368,9 +372,11 @@ void debugger_frame::UpdateUnitList()
 	m_choice_units->clear();
 	m_choice_units->addItem(NoThreadString);
 
-	const auto on_select = [&](u32, cpu_thread& cpu)
+	const auto on_select = [&](u32 id, cpu_thread& cpu)
 	{
-		QVariant var_cpu = QVariant::fromValue<void*>(&cpu);
+		QVariant var_cpu = QVariant::fromValue<std::weak_ptr<cpu_thread>>(
+			id >> 24 == 1 ? static_cast<std::weak_ptr<cpu_thread>>(idm::get_unlocked<named_thread<ppu_thread>>(id)) : idm::get_unlocked<named_thread<spu_thread>>(id));
+
 		m_choice_units->addItem(qstr(cpu.get_name()), var_cpu);
 		if (old_cpu == var_cpu) m_choice_units->setCurrentIndex(m_choice_units->count() - 1);
 	};
@@ -400,21 +406,24 @@ void debugger_frame::OnSelectUnit()
 
 	if (!m_no_thread_selected)
 	{
-		const auto on_select = [&](u32, cpu_thread& cpu)
+		if (const auto cpu0 = m_choice_units->currentData().value<std::weak_ptr<cpu_thread>>().lock())
 		{
-			cpu_thread* data = static_cast<cpu_thread*>(m_choice_units->currentData().value<void*>());
-			return data == &cpu;
-		};
-
-		if (auto ppu = idm::select<named_thread<ppu_thread>>(on_select))
-		{
-			m_disasm = std::make_unique<PPUDisAsm>(CPUDisAsm_InterpreterMode);
-			cpu = ppu.ptr;
-		}
-		else if (auto spu1 = idm::select<named_thread<spu_thread>>(on_select))
-		{
-			m_disasm = std::make_unique<SPUDisAsm>(CPUDisAsm_InterpreterMode);
-			cpu = spu1.ptr;
+			if (cpu0->id_type() == 1)
+			{
+				if (cpu0.get() == idm::check<named_thread<ppu_thread>>(cpu0->id))
+				{
+					cpu = cpu0;
+					m_disasm = std::make_unique<PPUDisAsm>(CPUDisAsm_InterpreterMode);
+				}
+			}
+			else
+			{
+				if (cpu0.get() == idm::check<named_thread<spu_thread>>(cpu0->id))
+				{
+					cpu = cpu0;
+					m_disasm = std::make_unique<SPUDisAsm>(CPUDisAsm_InterpreterMode);
+				}
+			}
 		}
 	}
 
@@ -489,7 +498,7 @@ void debugger_frame::ShowGotoAddressDialog()
 	expression_input->setFixedWidth(190);
 
 	// Ok/Cancel
-	QPushButton* button_ok = new QPushButton(tr("Ok"));
+	QPushButton* button_ok = new QPushButton(tr("OK"));
 	QPushButton* button_cancel = new QPushButton(tr("Cancel"));
 
 	hbox_address_preview_panel->addWidget(address_preview_label);

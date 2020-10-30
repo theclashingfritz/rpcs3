@@ -4,9 +4,9 @@
 
 llvm::LLVMContext g_llvm_ctx;
 
-cpu_translator::cpu_translator(llvm::Module* module, bool is_be)
+cpu_translator::cpu_translator(llvm::Module* _module, bool is_be)
     : m_context(g_llvm_ctx)
-	, m_module(module)
+	, m_module(_module)
 	, m_is_be(is_be)
 {
 }
@@ -57,6 +57,15 @@ void cpu_translator::initialize(llvm::LLVMContext& context, llvm::ExecutionEngin
 	{
 		m_use_fma = true;
 	}
+
+	// Test AVX-512_icelake features (TODO)
+	if (cpu == "icelake" ||
+		cpu == "icelake-client" ||
+		cpu == "icelake-server" ||
+		cpu == "tigerlake")
+	{
+		m_use_avx512_icl = true;
+	}
 }
 
 llvm::Value* cpu_translator::bitcast(llvm::Value* val, llvm::Type* type)
@@ -83,12 +92,31 @@ llvm::Value* cpu_translator::bitcast(llvm::Value* val, llvm::Type* type)
 }
 
 template <>
-v128 cpu_translator::get_const_vector<v128>(llvm::Constant* c, u32 a, u32 b)
+std::pair<bool, v128> cpu_translator::get_const_vector<v128>(llvm::Value* c, u32 a, u32 b)
 {
+	v128 result{};
+
+	if (!llvm::isa<llvm::Constant>(c))
+	{
+		return {false, result};
+	}
+
 	const auto t = c->getType();
 
 	if (!t->isVectorTy())
 	{
+		if (const auto ci = llvm::dyn_cast<llvm::ConstantInt>(c); ci && ci->getBitWidth() == 128)
+		{
+			auto cv = ci->getValue();
+
+			for (int i = 0; i < 128; i++)
+			{
+				result._bit[i] = cv[i];
+			}
+
+			return {true, result};
+		}
+
 		fmt::throw_exception("[0x%x, %u] Not a vector" HERE, a, b);
 	}
 
@@ -106,12 +134,16 @@ v128 cpu_translator::get_const_vector<v128>(llvm::Constant* c, u32 a, u32 b)
 			return {};
 		}
 
+		if (llvm::isa<llvm::ConstantExpr>(c))
+		{
+			// Sorry, if we cannot evaluate it we cannot use it
+			fmt::throw_exception("[0x%x, %u] Constant Expression!" HERE, a, b);
+		}
+
 		fmt::throw_exception("[0x%x, %u] Unexpected constant type" HERE, a, b);
 	}
 
 	const auto sct = t->getScalarType();
-
-	v128 result;
 
 	if (sct->isIntegerTy(8))
 	{
@@ -160,12 +192,17 @@ v128 cpu_translator::get_const_vector<v128>(llvm::Constant* c, u32 a, u32 b)
 		fmt::throw_exception("[0x%x, %u] Unexpected vector element type" HERE, a, b);
 	}
 
-	return result;
+	return {true, result};
 }
 
 template <>
 llvm::Constant* cpu_translator::make_const_vector<v128>(v128 v, llvm::Type* t)
 {
+	if (const auto ct = llvm::dyn_cast<llvm::IntegerType>(t); ct && ct->getBitWidth() == 128)
+	{
+		return llvm::ConstantInt::get(t, llvm::APInt(128, llvm::makeArrayRef(reinterpret_cast<const u64*>(v._bytes), 2)));
+	}
+
 	verify(HERE), t->isVectorTy() && llvm::cast<llvm::VectorType>(t)->getBitWidth() == 128;
 
 	const auto sct = t->getScalarType();

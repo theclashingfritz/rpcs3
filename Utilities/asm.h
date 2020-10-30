@@ -4,70 +4,66 @@
 
 namespace utils
 {
-	inline u32 cntlz32(u32 arg, bool nonzero = false)
+	// Transaction helper (Max = max attempts) (result = pair of success and op result)
+	template <uint Max = 10, typename F, typename R = std::invoke_result_t<F>>
+	inline auto tx_start(F op)
 	{
-#ifdef _MSC_VER
-		ulong res;
-		return _BitScanReverse(&res, arg) || nonzero ? res ^ 31 : 32;
-#elif __LZCNT__
-		return _lzcnt_u32(arg);
-#else
-		return arg || nonzero ? __builtin_clz(arg) : 32;
-#endif
-	}
+		uint status = -1;
 
-	inline u64 cntlz64(u64 arg, bool nonzero = false)
-	{
-#ifdef _MSC_VER
-		ulong res;
-		return _BitScanReverse64(&res, arg) || nonzero ? res ^ 63 : 64;
-#elif __LZCNT__
-		return _lzcnt_u64(arg);
+		for (uint i = 0; i < Max; i++)
+		{
+#ifndef _MSC_VER
+			__asm__ goto ("xbegin %l[retry];" ::: "memory" : retry);
 #else
-		return arg || nonzero ? __builtin_clzll(arg) : 64;
-#endif
-	}
+			status = _xbegin();
 
-	inline u32 cnttz32(u32 arg, bool nonzero = false)
-	{
-#ifdef _MSC_VER
-		ulong res;
-		return _BitScanForward(&res, arg) || nonzero ? res : 32;
-#elif __BMI__
-		return _tzcnt_u32(arg);
-#else
-		return arg || nonzero ? __builtin_ctz(arg) : 32;
+			if (status != _XBEGIN_STARTED) [[unlikely]]
+			{
+				goto retry;
+			}
 #endif
-	}
 
-	inline u64 cnttz64(u64 arg, bool nonzero = false)
-	{
-#ifdef _MSC_VER
-		ulong res;
-		return _BitScanForward64(&res, arg) || nonzero ? res : 64;
-#elif __BMI__
-		return _tzcnt_u64(arg);
+			if constexpr (std::is_void_v<R>)
+			{
+				std::invoke(op);
+#ifndef _MSC_VER
+				__asm__ volatile ("xend;" ::: "memory");
 #else
-		return arg || nonzero ? __builtin_ctzll(arg) : 64;
+				_xend();
 #endif
-	}
+				return true;
+			}
+			else
+			{
+				auto result = std::invoke(op);
+#ifndef _MSC_VER
+				__asm__ volatile ("xend;" ::: "memory");
+#else
+				_xend();
+#endif
+				return std::make_pair(true, std::move(result));
+			}
 
-	inline u8 popcnt32(u32 arg)
-	{
-#ifdef _MSC_VER
-		const u32 a1 = arg & 0x55555555;
-		const u32 a2 = (arg >> 1) & 0x55555555;
-		const u32 a3 = a1 + a2;
-		const u32 b1 = a3 & 0x33333333;
-		const u32 b2 = (a3 >> 2) & 0x33333333;
-		const u32 b3 = b1 + b2;
-		const u32 c3 = (b3 + (b3 >> 4)) & 0x0f0f0f0f;
-		const u32 d3 = c3 + (c3 >> 8);
-		return static_cast<u8>(d3 + (d3 >> 16));
-#else
-		return __builtin_popcount(arg);
+			retry:
+#ifndef _MSC_VER
+			__asm__ volatile ("movl %%eax, %0;" : "=r" (status) :: "memory");
 #endif
-	}
+			if (!status) [[unlikely]]
+			{
+				break;
+			}
+		}
+
+		if constexpr (std::is_void_v<R>)
+		{
+			return false;
+		}
+		else
+		{
+			return std::make_pair(false, R());
+		}
+	};
+
 
 // Rotate helpers
 #if defined(__GNUG__)

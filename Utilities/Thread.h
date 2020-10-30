@@ -40,6 +40,8 @@ enum class thread_state : u32
 	finished  // Final state, always set at the end of thread execution
 };
 
+class need_wakeup {};
+
 template <class Context>
 class named_thread;
 
@@ -210,6 +212,12 @@ public:
 		static_cast<thread_base&>(thread).notify();
 	}
 
+	template <typename T>
+	static void raw_notify(named_thread<T>& thread)
+	{
+		static_cast<thread_base&>(thread).notify_abort();
+	}
+
 	// Read current state
 	static inline thread_state state()
 	{
@@ -248,6 +256,16 @@ public:
 
 	// Sets the preferred affinity mask for this thread
 	static void set_thread_affinity_mask(u64 mask);
+
+	// Get process affinity mask
+	static u64 get_process_affinity_mask();
+
+	// Miscellaneous
+	static u64 get_thread_affinity_mask();
+
+private:
+	// Miscellaneous
+	static const u64 process_affinity_mask;
 };
 
 // Derived from the callable object Context, possibly a lambda
@@ -293,15 +311,17 @@ class named_thread final : public Context, result_storage_t<Context>, thread_bas
 
 			if (_this->m_state >= thread_state::aborting)
 			{
+				_this->m_state_notifier.store(data);
 				return false;
 			}
 
-			_this->m_state_notifier.release(data);
-
 			if (!data)
 			{
+				_this->m_state_notifier.release(data);
 				return true;
 			}
+
+			_this->m_state_notifier.store(data);
 
 			if (_this->m_state >= thread_state::aborting)
 			{
@@ -397,6 +417,11 @@ public:
 			if (s == thread_state::aborting)
 			{
 				thread::notify_abort();
+			}
+
+			if constexpr (std::is_base_of_v<need_wakeup, Context>)
+			{
+				this->wake_up();
 			}
 		}
 

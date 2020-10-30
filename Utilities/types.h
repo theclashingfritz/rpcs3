@@ -17,9 +17,12 @@
 #include <limits>
 #include <array>
 
-#if __has_include(<bit>)
-#include <bit>
+#ifdef _MSC_VER
+#if !defined(__cpp_lib_bitops) && _MSC_VER < 1928
+#define __cpp_lib_bitops
 #endif
+#endif
+#include <bit>
 
 #ifndef __has_builtin
 	#define __has_builtin(x) 0
@@ -27,7 +30,7 @@
 
 #ifdef _MSC_VER
 
-#define ASSUME(...) __assume(__VA_ARGS__) // MSVC __assume ignores side-effects
+#define ASSUME(...) ((__VA_ARGS__) ? void() : __assume(0))  // MSVC __assume ignores side-effects
 #define SAFE_BUFFERS __declspec(safebuffers)
 #define NEVER_INLINE __declspec(noinline)
 #define FORCE_INLINE __forceinline
@@ -37,13 +40,12 @@
 
 #ifdef __clang__
 #if defined(__has_builtin) && __has_builtin(__builtin_assume)
-#pragma clang diagnostic ignored "-Wassume" // ignore the clang "side-effects ignored" warning
-#define ASSUME(...) __builtin_assume(!!(__VA_ARGS__)) // __builtin_assume (supported by modern clang) ignores side-effects
+#define ASSUME(...) ((__VA_ARGS__) ? void() : __builtin_assume(0)) // __builtin_assume (supported by modern clang) ignores side-effects
 #endif
 #endif
 
 #ifndef ASSUME // gcc and old clang
-#define ASSUME(...) do { if (!(__VA_ARGS__)) __builtin_unreachable(); } while (0)  // note: the compiler will generate code to evaluate "cond" if the expression is opaque
+#define ASSUME(...) ((__VA_ARGS__) ? void() : __builtin_unreachable())  // note: the compiler will generate code to evaluate "cond" if the expression is opaque
 #endif
 
 #define SAFE_BUFFERS __attribute__((no_stack_protector))
@@ -74,7 +76,7 @@
 #define STR_CASE(...) case __VA_ARGS__: return #__VA_ARGS__
 
 
-#define ASSERT(...) do { if(!(__VA_ARGS__)) fmt::raw_error("Assertion failed: " STRINGIZE(__VA_ARGS__) HERE); } while(0)
+#define ASSERT(...) ((__VA_ARGS__) ? void() : fmt::raw_error("Assertion failed: " STRINGIZE(__VA_ARGS__) HERE))
 
 #if defined(_DEBUG) || defined(_AUDIT)
 #define AUDIT(...) ASSERT(__VA_ARGS__)
@@ -91,6 +93,11 @@ namespace std
 	constexpr To bit_cast(const From& from) noexcept
 	{
 		static_assert(sizeof(To) == sizeof(From), "std::bit_cast<>: incompatible type size");
+
+		if constexpr ((std::is_same_v<std::remove_const_t<To>, std::remove_const_t<From>> && std::is_constructible_v<To, From>) || (std::is_integral_v<From> && std::is_integral_v<To>))
+		{
+			return static_cast<To>(from);
+		}
 
 		To result{};
 		std::memcpy(&result, &from, sizeof(From));
@@ -122,6 +129,53 @@ using s8  = std::int8_t;
 using s16 = std::int16_t;
 using s32 = std::int32_t;
 using s64 = std::int64_t;
+
+#if __APPLE__
+namespace std
+{
+	template <typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
+	constexpr int countr_zero(T x) noexcept
+	{
+		if (x == 0)
+			return sizeof(T) * 8;
+		if constexpr (sizeof(T) <= sizeof(uint))
+			return __builtin_ctz(x);
+		else if constexpr (sizeof(T) <= sizeof(ulong))
+			return __builtin_ctzl(x);
+		else if constexpr (sizeof(T) <= sizeof(ullong))
+			return __builtin_ctzll(x);
+		else
+			static_assert(sizeof(T) <= sizeof(ullong));
+	}
+
+	template <typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
+	constexpr int countr_one(T x) noexcept
+	{
+		return countr_zero<T>(~x);
+	}
+
+	template <typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
+	constexpr int countl_zero(T x) noexcept
+	{
+		if (x == 0)
+			return sizeof(T) * 8;
+		if constexpr (sizeof(T) <= sizeof(uint))
+			return __builtin_clz(x) - (sizeof(uint) - sizeof(T)) * 8;
+		else if constexpr (sizeof(T) <= sizeof(ulong))
+			return __builtin_clzl(x) - (sizeof(ulong) - sizeof(T)) * 8;
+		else if constexpr (sizeof(T) <= sizeof(ullong))
+			return __builtin_clzll(x) - (sizeof(ullong) - sizeof(T)) * 8;
+		else
+			static_assert(sizeof(T) <= sizeof(ullong));
+	}
+
+	template <typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
+	constexpr int countl_one(T x) noexcept
+	{
+		return countl_zero<T>(~x);
+	}
+}
+#endif
 
 using steady_clock = std::conditional<
     std::chrono::high_resolution_clock::is_steady,
@@ -167,6 +221,12 @@ using get_uint_t = typename get_int_impl<N>::utype;
 template <std::size_t N>
 using get_sint_t = typename get_int_impl<N>::stype;
 
+template <typename T>
+std::remove_cvref_t<T> as_rvalue(T&& obj)
+{
+    return std::forward<T>(obj);
+}
+
 // Formatting helper, type-specific preprocessing for improving safety and functionality
 template <typename T, typename = void>
 struct fmt_unveil;
@@ -182,7 +242,7 @@ namespace fmt
 	const fmt_type_info* get_type_info();
 }
 
-template <typename T>
+template <typename T, std::size_t Align>
 class atomic_t;
 
 // Extract T::simple_type if available, remove cv qualifiers
@@ -209,14 +269,20 @@ class b8
 public:
 	b8() = default;
 
-	constexpr b8(bool value)
+	constexpr b8(bool value) noexcept
 		: m_value(value)
 	{
 	}
 
-	constexpr operator bool() const
+	constexpr operator bool() const noexcept
 	{
 		return m_value != 0;
+	}
+
+	constexpr bool set(bool value) noexcept
+	{
+		m_value = value;
+		return value;
 	}
 };
 
@@ -236,6 +302,11 @@ struct alignas(16) u128
 		: lo(l)
 		, hi(0)
 	{
+	}
+
+	constexpr explicit operator bool() const noexcept
+	{
+		return !!(lo | hi);
 	}
 
 	friend u128 operator+(const u128& l, const u128& r)
@@ -315,6 +386,28 @@ struct alignas(16) u128
 	{
 		u128 value = *this;
 		_subborrow_u64(_subborrow_u64(0, 1, lo, &lo), 0, hi, &hi);
+		return value;
+	}
+
+	u128 operator<<(u128 shift_value)
+	{
+		const u64 v0 = lo << (shift_value.lo & 63);
+		const u64 v1 = __shiftleft128(lo, hi, shift_value.lo);
+
+		u128 value;
+		value.lo = (shift_value.lo & 64) ? 0 : v0;
+		value.hi = (shift_value.lo & 64) ? v0 : v1;
+		return value;
+	}
+
+	u128 operator>>(u128 shift_value)
+	{
+		const u64 v0 = hi >> (shift_value.lo & 63);
+		const u64 v1 = __shiftright128(lo, hi, shift_value.lo);
+
+		u128 value;
+		value.lo = (shift_value.lo & 64) ? v0 : v1;
+		value.hi = (shift_value.lo & 64) ? 0 : v0;
 		return value;
 	}
 
@@ -902,11 +995,12 @@ struct cmd64 : any64
 static_assert(sizeof(cmd64) == 8 && std::is_trivially_copyable_v<cmd64>, "Incorrect cmd64 type");
 
 // Error code type (return type), implements error reporting. Could be a template.
-struct error_code
+class error_code
 {
 	// Use fixed s32 type for now
 	s32 value;
 
+public:
 	error_code() = default;
 
 	// Implementation must be provided specially

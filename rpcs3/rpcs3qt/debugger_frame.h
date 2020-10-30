@@ -32,7 +32,6 @@ class debugger_frame : public custom_dock_widget
 	QTextEdit* m_regs;
 	QPushButton* m_go_to_addr;
 	QPushButton* m_go_to_pc;
-	QPushButton* m_btn_capture;
 	QPushButton* m_btn_step;
 	QPushButton* m_btn_step_over;
 	QPushButton* m_btn_run;
@@ -87,7 +86,7 @@ protected:
 
 Q_SIGNALS:
 	void DebugFrameClosed();
-	void CallStackUpdateRequested(std::vector<u32> call_stack);
+	void CallStackUpdateRequested(std::vector<std::pair<u32, u32>> call_stack);
 
 public Q_SLOTS:
 	void DoStep(bool stepOver = false);

@@ -48,7 +48,7 @@ enum
 	SYS_SPU_THREAD_GROUP_LOG_GET_STATUS = 0x2,
 };
 
-enum : u32
+enum spu_group_status : u32
 {
 	SPU_THREAD_GROUP_STATUS_NOT_INITIALIZED,
 	SPU_THREAD_GROUP_STATUS_INITIALIZED,
@@ -58,6 +58,7 @@ enum : u32
 	SPU_THREAD_GROUP_STATUS_WAITING_AND_SUSPENDED,
 	SPU_THREAD_GROUP_STATUS_RUNNING,
 	SPU_THREAD_GROUP_STATUS_STOPPED,
+	SPU_THREAD_GROUP_STATUS_DESTROYED, // Internal state
 	SPU_THREAD_GROUP_STATUS_UNKNOWN,
 };
 
@@ -66,6 +67,16 @@ enum : s32
 	SYS_SPU_SEGMENT_TYPE_COPY = 1,
 	SYS_SPU_SEGMENT_TYPE_FILL = 2,
 	SYS_SPU_SEGMENT_TYPE_INFO = 4,
+};
+
+enum : u32
+{
+	SYS_SPU_THREAD_STOP_YIELD                = 0x0100,
+	SYS_SPU_THREAD_STOP_GROUP_EXIT           = 0x0101,
+	SYS_SPU_THREAD_STOP_THREAD_EXIT          = 0x0102,
+	SYS_SPU_THREAD_STOP_RECEIVE_EVENT        = 0x0110,
+	SYS_SPU_THREAD_STOP_TRY_RECEIVE_EVENT    = 0x0111,
+	SYS_SPU_THREAD_STOP_SWITCH_SYSTEM_MODULE = 0x0120,
 };
 
 struct sys_spu_thread_group_attribute
@@ -211,7 +222,7 @@ struct sys_spu_image
 
 	void load(const fs::file& stream);
 	void free();
-	static void deploy(u32 loc, sys_spu_segment* segs, u32 nsegs);
+	static void deploy(u8* loc, sys_spu_segment* segs, u32 nsegs);
 };
 
 enum : u32
@@ -249,6 +260,7 @@ struct lv2_spu_group
 	static const u32 id_base = 0x04000100;
 	static const u32 id_step = 0x100;
 	static const u32 id_count = 255;
+	static constexpr std::pair<u32, u32> id_invl_range = {0, 8};
 
 	const std::string name;
 	const u32 id;
@@ -263,13 +275,13 @@ struct lv2_spu_group
 
 	atomic_t<u32> init; // Initialization Counter
 	atomic_t<s32> prio; // SPU Thread Group Priority
-	atomic_t<u32> run_state; // SPU Thread Group State
+	atomic_t<spu_group_status> run_state; // SPU Thread Group State
 	atomic_t<s32> exit_status; // SPU Thread Group Exit Status
 	atomic_t<u32> join_state; // flags used to detect exit cause and signal
 	atomic_t<u32> running; // Number of running threads
-	cond_variable cond; // used to signal waiting PPU thread
 	atomic_t<u64> stop_count;
 	class ppu_thread* waiter = nullptr;
+	bool set_terminate = false;
 
 	std::array<std::shared_ptr<named_thread<spu_thread>>, 8> threads; // SPU Threads
 	std::array<s8, 256> threads_map; // SPU Threads map based number
@@ -366,7 +378,7 @@ error_code sys_spu_thread_connect_event(ppu_thread&, u32 id, u32 eq, u32 et, u8 
 error_code sys_spu_thread_disconnect_event(ppu_thread&, u32 id, u32 event_type, u8 spup);
 error_code sys_spu_thread_bind_queue(ppu_thread&, u32 id, u32 spuq, u32 spuq_num);
 error_code sys_spu_thread_unbind_queue(ppu_thread&, u32 id, u32 spuq_num);
-error_code sys_spu_thread_get_exit_status(ppu_thread&, u32 id, vm::ptr<u32> status);
+error_code sys_spu_thread_get_exit_status(ppu_thread&, u32 id, vm::ptr<s32> status);
 error_code sys_spu_thread_recover_page_fault(ppu_thread&, u32 id);
 
 error_code sys_raw_spu_create(ppu_thread&, vm::ptr<u32> id, vm::ptr<void> attr);
@@ -380,3 +392,15 @@ error_code sys_raw_spu_read_puint_mb(ppu_thread&, u32 id, vm::ptr<u32> value);
 error_code sys_raw_spu_set_spu_cfg(ppu_thread&, u32 id, u32 value);
 error_code sys_raw_spu_get_spu_cfg(ppu_thread&, u32 id, vm::ptr<u32> value);
 error_code sys_raw_spu_recover_page_fault(ppu_thread&, u32 id);
+
+error_code sys_isolated_spu_create(ppu_thread&, vm::ptr<u32> id, vm::ptr<void> image, u64 arg1, u64 arg2, u64 arg3, u64 arg4);
+error_code sys_isolated_spu_start(ppu_thread&, u32 id);
+error_code sys_isolated_spu_destroy(ppu_thread& ppu, u32 id);
+error_code sys_isolated_spu_create_interrupt_tag(ppu_thread&, u32 id, u32 class_id, u32 hwthread, vm::ptr<u32> intrtag);
+error_code sys_isolated_spu_set_int_mask(ppu_thread&, u32 id, u32 class_id, u64 mask);
+error_code sys_isolated_spu_get_int_mask(ppu_thread&, u32 id, u32 class_id, vm::ptr<u64> mask);
+error_code sys_isolated_spu_set_int_stat(ppu_thread&, u32 id, u32 class_id, u64 stat);
+error_code sys_isolated_spu_get_int_stat(ppu_thread&, u32 id, u32 class_id, vm::ptr<u64> stat);
+error_code sys_isolated_spu_read_puint_mb(ppu_thread&, u32 id, vm::ptr<u32> value);
+error_code sys_isolated_spu_set_spu_cfg(ppu_thread&, u32 id, u32 value);
+error_code sys_isolated_spu_get_spu_cfg(ppu_thread&, u32 id, vm::ptr<u32> value);

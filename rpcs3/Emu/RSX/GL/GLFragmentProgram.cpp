@@ -2,7 +2,6 @@
 #include "GLFragmentProgram.h"
 
 #include "Emu/System.h"
-#include "GLHelpers.h"
 #include "GLFragmentProgram.h"
 #include "GLCommonDecompiler.h"
 #include "../GCM.h"
@@ -191,6 +190,11 @@ void GLFragmentDecompilerThread::insertConstants(std::stringstream & OS)
 	OS << "{\n";
 	OS << "	sampler_info texture_parameters[16];\n";
 	OS << "};\n\n";
+
+	OS << "layout(std140, binding = " << GL_RASTERIZER_STATE_BIND_SLOT << ") uniform RasterizerHeap\n";
+	OS << "{\n";
+	OS << "	uvec4 stipple_pattern[8];\n";
+	OS << "};\n\n";
 }
 
 void GLFragmentDecompilerThread::insertGlobalFunctions(std::stringstream &OS)
@@ -202,6 +206,7 @@ void GLFragmentDecompilerThread::insertGlobalFunctions(std::stringstream &OS)
 	m_shader_props.require_wpos = !!(properties.in_register_mask & in_wpos);
 	m_shader_props.require_texture_ops = properties.has_tex_op;
 	m_shader_props.require_shadow_ops = m_prog.shadow_textures != 0;
+	m_shader_props.require_texture_expand = properties.has_exp_tex_op;
 	m_shader_props.emulate_coverage_tests = true; // g_cfg.video.antialiasing_level == msaa_level::none;
 	m_shader_props.emulate_shadow_compare = device_props.emulate_depth_compare;
 	m_shader_props.low_precision_tests = ::gl::get_driver_caps().vendor_NVIDIA;
@@ -304,6 +309,8 @@ void GLFragmentDecompilerThread::insertMainEnd(std::stringstream & OS)
 	OS << "void main()\n";
 	OS << "{\n";
 
+	::glsl::insert_rop_init(OS);
+
 	OS << "\n" << "	fs_main();\n\n";
 
 	glsl::insert_rop(OS, m_shader_props);
@@ -341,7 +348,8 @@ GLFragmentProgram::~GLFragmentProgram()
 void GLFragmentProgram::Decompile(const RSXFragmentProgram& prog)
 {
 	u32 size;
-	GLFragmentDecompilerThread decompiler(shader, parr, prog, size);
+	std::string source;
+	GLFragmentDecompilerThread decompiler(source, parr, prog, size);
 
 	if (!g_cfg.video.disable_native_float16)
 	{
@@ -365,55 +373,18 @@ void GLFragmentProgram::Decompile(const RSXFragmentProgram& prog)
 			FragmentConstantOffsetCache.push_back(offset);
 		}
 	}
+
+	shader.create(::glsl::program_domain::glsl_fragment_program, source);
 }
 
 void GLFragmentProgram::Compile()
 {
-	if (id)
-	{
-		glDeleteShader(id);
-	}
-
-	id = glCreateShader(GL_FRAGMENT_SHADER);
-
-	const char* str = shader.c_str();
-	const int strlen = ::narrow<int>(shader.length());
-
-	fs::file(fs::get_cache_dir() + "shaderlog/FragmentProgram" + std::to_string(id) + ".glsl", fs::rewrite).write(str);
-
-	glShaderSource(id, 1, &str, &strlen);
-	glCompileShader(id);
-
-	GLint compileStatus = GL_FALSE;
-	glGetShaderiv(id, GL_COMPILE_STATUS, &compileStatus); // Determine the result of the glCompileShader call
-	if (compileStatus != GL_TRUE) // If the shader failed to compile...
-	{
-		GLint infoLength;
-		glGetShaderiv(id, GL_INFO_LOG_LENGTH, &infoLength); // Retrieve the length in bytes (including trailing NULL) of the shader info log
-
-		if (infoLength > 0)
-		{
-			GLsizei len;
-			char* buf = new char[infoLength]; // Buffer to store infoLog
-
-			glGetShaderInfoLog(id, infoLength, &len, buf); // Retrieve the shader info log into our buffer
-			rsx_log.error("Failed to compile shader: %s", buf); // Write log to the console
-
-			delete[] buf;
-		}
-
-		rsx_log.notice("%s", shader); // Log the text of the shader that failed to compile
-		Emu.Pause(); // Pause the emulator, we can't really continue from here
-	}
+	shader.compile();
+	id = shader.id();
 }
 
 void GLFragmentProgram::Delete()
 {
-	shader.clear();
-
-	if (id)
-	{
-		glDeleteShader(id);
-		id = 0;
-	}
+	shader.remove();
+	id = 0;
 }

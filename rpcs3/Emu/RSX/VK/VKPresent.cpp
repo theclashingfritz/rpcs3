@@ -1,6 +1,6 @@
 ﻿#include "stdafx.h"
 #include "VKGSRender.h"
-
+#include "Emu/Cell/Modules/cellVideoOut.h"
 
 void VKGSRender::reinitialize_swapchain()
 {
@@ -104,8 +104,11 @@ void VKGSRender::advance_queued_frames()
 	// Check all other frames for completion and clear resources
 	check_present_status();
 
+	// Run video memory balancer
+	vk::vmm_check_memory_usage();
+
 	// m_rtts storage is double buffered and should be safe to tag on frame boundary
-	m_rtts.free_invalidated();
+	m_rtts.free_invalidated(*m_current_command_buffer);
 
 	// Texture cache is also double buffered to prevent use-after-free
 	m_texture_cache.on_frame_end();
@@ -122,7 +125,8 @@ void VKGSRender::advance_queued_frames()
 		m_fragment_constants_ring_info.get_current_put_pos_minus_one(),
 		m_transform_constants_ring_info.get_current_put_pos_minus_one(),
 		m_index_buffer_ring_info.get_current_put_pos_minus_one(),
-		m_texture_upload_buffer_ring_info.get_current_put_pos_minus_one());
+		m_texture_upload_buffer_ring_info.get_current_put_pos_minus_one(),
+		m_raster_env_ring_info.get_current_put_pos_minus_one());
 
 	m_queued_frames.push_back(m_current_frame);
 	verify(HERE), m_queued_frames.size() <= VK_MAX_ASYNC_FRAMES;
@@ -162,10 +166,10 @@ void VKGSRender::queue_swap_request()
 	m_current_cb_index = (m_current_cb_index + 1) % VK_MAX_ASYNC_CB_COUNT;
 	m_current_command_buffer = &m_primary_cb_list[m_current_cb_index];
 	m_current_command_buffer->reset();
+	m_current_command_buffer->begin();
 
 	// Set up new pointers for the next frame
 	advance_queued_frames();
-	open_command_buffer();
 }
 
 void VKGSRender::frame_context_cleanup(vk::frame_context_t *ctx, bool free_resources)
@@ -193,6 +197,7 @@ void VKGSRender::frame_context_cleanup(vk::frame_context_t *ctx, bool free_resou
 
 		if (m_overlay_manager && m_overlay_manager->has_dirty())
 		{
+			auto ui_renderer = vk::get_overlay_pass<vk::ui_overlay_renderer>();
 			m_overlay_manager->lock();
 
 			std::vector<u32> uids_to_dispose;
@@ -200,7 +205,7 @@ void VKGSRender::frame_context_cleanup(vk::frame_context_t *ctx, bool free_resou
 
 			for (const auto& view : m_overlay_manager->get_dirty())
 			{
-				m_ui_renderer->remove_temp_resources(view->uid);
+				ui_renderer->remove_temp_resources(view->uid);
 				uids_to_dispose.push_back(view->uid);
 			}
 
@@ -210,12 +215,16 @@ void VKGSRender::frame_context_cleanup(vk::frame_context_t *ctx, bool free_resou
 
 		vk::reset_global_resources();
 
-		m_attachment_clear_pass->free_resources();
-		m_depth_converter->free_resources();
-		m_ui_renderer->free_resources();
-		m_video_output_pass->free_resources();
-
 		ctx->buffer_views_to_clean.clear();
+
+		const auto shadermode = g_cfg.video.shadermode.get();
+
+		if (shadermode == shader_mode::async_with_interpreter || shadermode == shader_mode::interpreter_only)
+		{
+			// TODO: This is jank AF
+			m_vertex_instructions_buffer.reset_allocation_stats();
+			m_fragment_instructions_buffer.reset_allocation_stats();
+		}
 
 		if (ctx->last_frame_sync_time > m_last_heap_sync_time)
 		{
@@ -266,7 +275,7 @@ vk::image* VKGSRender::get_present_source(vk::present_surface_info* info, const 
 	vk::image* image_to_flip = nullptr;
 
 	// Check the surface store first
-	const auto format_bpp = get_format_block_size_in_bytes(info->format);
+	const auto format_bpp = rsx::get_format_block_size_in_bytes(info->format);
 	const auto overlap_info = m_rtts.get_merged_texture_memory_region(*m_current_command_buffer,
 		info->address, info->width, info->height, info->pitch, format_bpp, rsx::surface_access::read);
 
@@ -338,8 +347,22 @@ vk::image* VKGSRender::get_present_source(vk::present_surface_info* info, const 
 			flush_command_queue();
 		}
 
+		VkFormat format;
+		switch (avconfig->format)
+		{
+		default:
+			rsx_log.error("Unhandled video output format 0x%x", avconfig->format);
+			[[fallthrough]];
+		case CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8R8G8B8:
+			format = VK_FORMAT_B8G8R8A8_UNORM;
+			break;
+		case CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8B8G8R8:
+			format = VK_FORMAT_R8G8B8A8_UNORM;
+			break;
+		}
+
 		m_texture_cache.invalidate_range(*m_current_command_buffer, range, rsx::invalidation_cause::read);
-		image_to_flip = m_texture_cache.upload_image_simple(*m_current_command_buffer, info->address, info->width, info->height, info->pitch);
+		image_to_flip = m_texture_cache.upload_image_simple(*m_current_command_buffer, format, info->address, info->width, info->height, info->pitch);
 	}
 
 	return image_to_flip;
@@ -562,7 +585,9 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 	if (image_to_flip)
 	{
-		if (!g_cfg.video.full_rgb_range_output || !rsx::fcmp(avconfig->gamma, 1.f) || avconfig->_3d) [[unlikely]]
+		const bool use_full_rgb_range_output = g_cfg.video.full_rgb_range_output.get();
+
+		if (!use_full_rgb_range_output || !rsx::fcmp(avconfig->gamma, 1.f) || avconfig->_3d) [[unlikely]]
 		{
 			calibration_src.push_back(dynamic_cast<vk::viewable_image*>(image_to_flip));
 			verify("Image not viewable" HERE), calibration_src.front();
@@ -576,8 +601,26 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 		if (calibration_src.empty()) [[likely]]
 		{
-			vk::copy_scaled_image(*m_current_command_buffer, image_to_flip->value, target_image, image_to_flip->current_layout, target_layout,
-				{ 0, 0, static_cast<s32>(buffer_width), static_cast<s32>(buffer_height) }, aspect_ratio, 1, VK_IMAGE_ASPECT_COLOR_BIT, false);
+			// Do raw transfer here as there is no image object associated with textures owned by the driver (TODO)
+			const areai dst_rect = aspect_ratio;
+			VkImageBlit rgn = {};
+
+			rgn.srcSubresource = { image_to_flip->aspect(), 0, 0, 1 };
+			rgn.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+			rgn.srcOffsets[0] = { 0, 0, 0 };
+			rgn.srcOffsets[1] = { s32(buffer_width), s32(buffer_height), 1 };
+			rgn.dstOffsets[0] = { dst_rect.x1, dst_rect.y1, 0 };
+			rgn.dstOffsets[1] = { dst_rect.x2, dst_rect.y2, 1 };
+
+			image_to_flip->push_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+			if (target_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+			{
+				vk::change_image_layout(*m_current_command_buffer, target_image, target_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, subresource_range);
+				target_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			}
+
+			vkCmdBlitImage(*m_current_command_buffer, image_to_flip->value, image_to_flip->current_layout, target_image, target_layout, 1, &rgn, VK_FILTER_LINEAR);
+			image_to_flip->pop_layout(*m_current_command_buffer);
 		}
 		else
 		{
@@ -590,11 +633,13 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 			direct_fbo = vk::get_framebuffer(*m_device, m_swapchain_dims.width, m_swapchain_dims.height, single_target_pass, m_swapchain->get_surface_format(), target_image);
 			direct_fbo->add_ref();
-
 			image_to_flip->push_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-			m_video_output_pass->run(*m_current_command_buffer, areau(aspect_ratio), direct_fbo, calibration_src, avconfig->gamma, !g_cfg.video.full_rgb_range_output, avconfig->_3d, single_target_pass);
-			image_to_flip->pop_layout(*m_current_command_buffer);
 
+			vk::get_overlay_pass<vk::video_out_calibration_pass>()->run(
+				*m_current_command_buffer, areau(aspect_ratio), direct_fbo, calibration_src,
+				avconfig->gamma, !use_full_rgb_range_output, avconfig->_3d, single_target_pass);
+
+			image_to_flip->pop_layout(*m_current_command_buffer);
 			direct_fbo->release();
 		}
 
@@ -632,7 +677,8 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			memcpy(sshot_frame.data(), src, sshot_size);
 			sshot_vkbuf.unmap();
 
-			m_frame->take_screenshot(std::move(sshot_frame), buffer_width, buffer_height);
+			const bool is_bgra = image_to_flip->format() == VK_FORMAT_B8G8R8A8_UNORM;
+			m_frame->take_screenshot(std::move(sshot_frame), buffer_width, buffer_height, is_bgra);
 		}
 	}
 
@@ -671,11 +717,12 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 		if (has_overlay)
 		{
 			// Lock to avoid modification during run-update chain
+			auto ui_renderer = vk::get_overlay_pass<vk::ui_overlay_renderer>();
 			std::lock_guard lock(*m_overlay_manager);
 
 			for (const auto& view : m_overlay_manager->get_views())
 			{
-				m_ui_renderer->run(*m_current_command_buffer, areau(aspect_ratio), direct_fbo, single_target_pass, m_texture_upload_buffer_ring_info, *view.get());
+				ui_renderer->run(*m_current_command_buffer, areau(aspect_ratio), direct_fbo, single_target_pass, m_texture_upload_buffer_ring_info, *view.get());
 			}
 		}
 

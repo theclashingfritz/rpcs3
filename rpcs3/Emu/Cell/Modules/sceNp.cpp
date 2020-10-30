@@ -15,13 +15,14 @@
 
 LOG_CHANNEL(sceNp);
 
-template<>
+template <>
 void fmt_class_string<SceNpError>::format(std::string& out, u64 arg)
 {
 	format_enum(out, arg, [](auto error)
 	{
 		switch (error)
 		{
+			STR_CASE(GAME_ERR_NOT_XMBBUY_CONTENT);
 			STR_CASE(SCE_NP_ERROR_NOT_INITIALIZED);
 			STR_CASE(SCE_NP_ERROR_ALREADY_INITIALIZED);
 			STR_CASE(SCE_NP_ERROR_INVALID_ARGUMENT);
@@ -335,6 +336,20 @@ void fmt_class_string<SceNpError>::format(std::string& out, u64 arg)
 			STR_CASE(SCE_NP_CORE_SERVER_ERROR_RESOURCE_CONSTRAINT);
 			STR_CASE(SCE_NP_CORE_SERVER_ERROR_SYSTEM_SHUTDOWN);
 			STR_CASE(SCE_NP_CORE_SERVER_ERROR_UNSUPPORTED_CLIENT_VERSION);
+			STR_CASE(SCE_NP_DRM_INSTALL_ERROR_FORMAT);
+			STR_CASE(SCE_NP_DRM_INSTALL_ERROR_CHECK);
+			STR_CASE(SCE_NP_DRM_INSTALL_ERROR_UNSUPPORTED);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_SERVICE_IS_END);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_SERVICE_STOP_TEMPORARILY);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_SERVICE_IS_BUSY);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_INVALID_USER_CREDENTIAL);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_INVALID_PRODUCT_ID);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_ACCOUNT_IS_CLOSED);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_ACCOUNT_IS_SUSPENDED);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_ACTIVATED_CONSOLE_IS_FULL);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_CONSOLE_NOT_ACTIVATED);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_PRIMARY_CONSOLE_CANNOT_CHANGED);
+			STR_CASE(SCE_NP_DRM_SERVER_ERROR_UNKNOWN);
 			STR_CASE(SCE_NP_SIGNALING_ERROR_NOT_INITIALIZED);
 			STR_CASE(SCE_NP_SIGNALING_ERROR_ALREADY_INITIALIZED);
 			STR_CASE(SCE_NP_SIGNALING_ERROR_OUT_OF_MEMORY);
@@ -428,12 +443,18 @@ error_code sceNpTerm()
 
 error_code npDrmIsAvailable(vm::cptr<u8> k_licensee_addr, vm::cptr<char> drm_path)
 {
-	std::array<u8, 0x10> k_licensee{};
+	v128 k_licensee{};
 
 	if (k_licensee_addr)
 	{
-		std::copy_n(k_licensee_addr.get_ptr(), k_licensee.size(), k_licensee.begin());
-		sceNp.notice("npDrmIsAvailable(): KLicense key %s", *reinterpret_cast<be_t<v128, 1>*>(k_licensee.data()));
+		std::memcpy(&k_licensee, k_licensee_addr.get_ptr(), sizeof(k_licensee));
+		sceNp.notice("npDrmIsAvailable(): KLicense key %s", std::bit_cast<be_t<v128>>(k_licensee));
+	}
+
+	if (Emu.GetCat() == "PE")
+	{
+		std::memcpy(&k_licensee, NP_PSP_KEY_2, sizeof(k_licensee));
+		sceNp.success("npDrmIsAvailable(): PSP remaster KLicense key applied.");
 	}
 
 	const std::string enc_drm_path(drm_path.get_ptr(), std::find(drm_path.get_ptr(), drm_path.get_ptr() + 0x100, '\0'));
@@ -447,9 +468,6 @@ error_code npDrmIsAvailable(vm::cptr<u8> k_licensee_addr, vm::cptr<char> drm_pat
 	}
 
 	auto npdrmkeys = g_fxo->get<loaded_npdrm_keys>();
-
-	npdrmkeys->devKlic.fill(0);
-	npdrmkeys->rifKey.fill(0);
 
 	std::string rap_dir_path = "/dev_hdd0/home/" + Emu.GetUsr() + "/exdata/";
 
@@ -466,9 +484,9 @@ error_code npDrmIsAvailable(vm::cptr<u8> k_licensee_addr, vm::cptr<char> drm_pat
 		if (!k_licensee_addr)
 			k_licensee = get_default_self_klic();
 
-		if (verify_npdrm_self_headers(enc_file, k_licensee.data()))
+		if (verify_npdrm_self_headers(enc_file, k_licensee._bytes))
 		{
-			npdrmkeys->devKlic = std::move(k_licensee);
+			npdrmkeys->devKlic = k_licensee;
 		}
 		else
 		{
@@ -482,10 +500,10 @@ error_code npDrmIsAvailable(vm::cptr<u8> k_licensee_addr, vm::cptr<char> drm_pat
 
 		std::string contentID;
 
-		if (VerifyEDATHeaderWithKLicense(enc_file, enc_drm_path_local, k_licensee, &contentID))
+		if (VerifyEDATHeaderWithKLicense(enc_file, enc_drm_path_local, k_licensee._bytes, &contentID))
 		{
 			const std::string rap_file = rap_dir_path + contentID + ".rap";
-			npdrmkeys->devKlic         = std::move(k_licensee);
+			npdrmkeys->devKlic = k_licensee;
 
 			if (fs::is_file(vfs::get(rap_file)))
 				npdrmkeys->rifKey = GetEdatRifKeyFromRapFile(fs::file{vfs::get(rap_file)});
@@ -569,6 +587,13 @@ error_code sceNpDrmVerifyUpgradeLicense2(vm::cptr<char> content_id)
 error_code sceNpDrmExecuteGamePurchase()
 {
 	sceNp.todo("sceNpDrmExecuteGamePurchase()");
+
+	// TODO:
+	// 0. Check if the game can be purchased (return GAME_ERR_NOT_XMBBUY_CONTENT otherwise)
+	// 1. Send game termination request
+	// 2. "Buy game" transaction (a.k.a. do nothing for now)
+	// 3. Reboot game with CELL_GAME_ATTRIBUTE_XMBBUY attribute set (cellGameBootCheck)
+
 	return CELL_OK;
 }
 
@@ -578,10 +603,10 @@ error_code sceNpDrmGetTimelimit(vm::cptr<char> path, vm::ptr<u64> time_remain)
 
 	if (!path || !time_remain)
 	{
-		return SCE_NP_ERROR_INVALID_ARGUMENT;
+		return SCE_NP_DRM_ERROR_INVALID_PARAM;
 	}
 
-	*time_remain = 0x7FFFFFFFFFFFFFFFULL;
+	*time_remain = SCE_NP_DRM_TIME_INFO_ENDLESS;
 
 	return CELL_OK;
 }
@@ -608,13 +633,14 @@ error_code sceNpDrmProcessExitSpawn2(ppu_thread& ppu, vm::cptr<u8> klicensee, vm
 		return error;
 	}
 
+	// TODO: check if SCE_NP_DRM_EXITSPAWN2_EXIT_WO_FINI logic is implemented
 	ppu_execute<&sys_game_process_exitspawn2>(ppu, path, argv, envp, data, data_size, prio, flags);
 	return CELL_OK;
 }
 
 error_code sceNpBasicRegisterHandler(vm::cptr<SceNpCommunicationId> context, vm::ptr<SceNpBasicEventHandler> handler, vm::ptr<void> arg)
 {
-	sceNp.todo("sceNpBasicRegisterHandler(context=*0x%x, handler=*0x%x, arg=*0x%x)", context, handler, arg);
+	sceNp.warning("sceNpBasicRegisterHandler(context=*0x%x, handler=*0x%x, arg=*0x%x)", context, handler, arg);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -627,6 +653,9 @@ error_code sceNpBasicRegisterHandler(vm::cptr<SceNpCommunicationId> context, vm:
 	{
 		return SCE_NP_BASIC_ERROR_INVALID_ARGUMENT;
 	}
+
+	nph->basic_handler = handler;
+	nph->basic_handler_arg = arg;
 
 	return CELL_OK;
 }
@@ -1127,6 +1156,13 @@ error_code sceNpBasicAddPlayersHistoryAsync(vm::cptr<SceNpId> npids, u32 count, 
 	if (description && strlen(description.get_ptr()) > SCE_NP_BASIC_DESCRIPTION_CHARACTER_MAX)
 	{
 		return SCE_NP_BASIC_ERROR_EXCEEDS_MAX;
+	}
+
+	auto req_id = nph->add_players_to_history(npids, count);
+
+	if (reqId)
+	{
+		*reqId = req_id;
 	}
 
 	return CELL_OK;
@@ -1877,7 +1913,7 @@ error_code sceNpFriendlistAbortGui()
 
 error_code sceNpLookupInit()
 {
-	sceNp.todo("sceNpLookupInit()");
+	sceNp.warning("sceNpLookupInit()");
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -1919,7 +1955,7 @@ error_code sceNpLookupTerm()
 
 error_code sceNpLookupCreateTitleCtx(vm::cptr<SceNpCommunicationId> communicationId, vm::cptr<SceNpId> selfNpId)
 {
-	sceNp.todo("sceNpLookupCreateTitleCtx(communicationId=*0x%x, selfNpId=0x%x)", communicationId, selfNpId);
+	sceNp.warning("sceNpLookupCreateTitleCtx(communicationId=*0x%x, selfNpId=0x%x)", communicationId, selfNpId);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -1933,12 +1969,12 @@ error_code sceNpLookupCreateTitleCtx(vm::cptr<SceNpCommunicationId> communicatio
 		return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
 	}
 
-	return not_an_error(nph->create_lookup_context(communicationId));
+	return not_an_error(nph->create_lookup_title_context(communicationId));
 }
 
 error_code sceNpLookupDestroyTitleCtx(s32 titleCtxId)
 {
-	sceNp.todo("sceNpLookupDestroyTitleCtx(titleCtxId=%d)", titleCtxId);
+	sceNp.warning("sceNpLookupDestroyTitleCtx(titleCtxId=%d)", titleCtxId);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -1947,7 +1983,7 @@ error_code sceNpLookupDestroyTitleCtx(s32 titleCtxId)
 		return SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED;
 	}
 
-	if (!nph->destroy_lookup_context(titleCtxId))
+	if (!nph->destroy_lookup_title_context(titleCtxId))
 		return SCE_NP_COMMUNITY_ERROR_INVALID_ID;
 
 	return CELL_OK;
@@ -1955,7 +1991,7 @@ error_code sceNpLookupDestroyTitleCtx(s32 titleCtxId)
 
 error_code sceNpLookupCreateTransactionCtx(s32 titleCtxId)
 {
-	sceNp.todo("sceNpLookupCreateTransactionCtx(titleCtxId=%d)", titleCtxId);
+	sceNp.warning("sceNpLookupCreateTransactionCtx(titleCtxId=%d)", titleCtxId);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -1969,18 +2005,23 @@ error_code sceNpLookupCreateTransactionCtx(s32 titleCtxId)
 		return SCE_NP_COMMUNITY_ERROR_INVALID_ONLINE_ID;
 	}
 
-	return CELL_OK;
+	return not_an_error(nph->create_lookup_transaction_context(titleCtxId));
 }
 
 error_code sceNpLookupDestroyTransactionCtx(s32 transId)
 {
-	sceNp.todo("sceNpLookupDestroyTransactionCtx(transId=%d)", transId);
+	sceNp.warning("sceNpLookupDestroyTransactionCtx(transId=%d)", transId);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
 	if (!nph->is_NP_Lookup_init)
 	{
 		return SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED;
+	}
+
+	if (!nph->destroy_lookup_transaction_context(transId))
+	{
+		return SCE_NP_COMMUNITY_ERROR_INVALID_ID;
 	}
 
 	return CELL_OK;
@@ -1997,7 +2038,7 @@ error_code sceNpLookupSetTimeout(s32 ctxId, usecond_t timeout)
 		return SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED;
 	}
 
-	if (timeout > 10000000) // 10 seconds
+	if (timeout < 10000000) // 10 seconds
 	{
 		return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
 	}
@@ -2035,7 +2076,7 @@ error_code sceNpLookupWaitAsync(s32 transId, vm::ptr<s32> result)
 
 error_code sceNpLookupPollAsync(s32 transId, vm::ptr<s32> result)
 {
-	sceNp.todo("sceNpLookupPollAsync(transId=%d, result=%d)", transId, result);
+	sceNp.todo("sceNpLookupPollAsync(transId=%d, result=*0x%x)", transId, result);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -2043,6 +2084,8 @@ error_code sceNpLookupPollAsync(s32 transId, vm::ptr<s32> result)
 	{
 		return SCE_NP_COMMUNITY_ERROR_NOT_INITIALIZED;
 	}
+
+	*result = 0;
 
 	return CELL_OK;
 }
@@ -2383,6 +2426,8 @@ error_code sceNpLookupTitleSmallStorageAsync(s32 transId, vm::ptr<void> data, u6
 		return SCE_NP_COMMUNITY_ERROR_INVALID_ONLINE_ID;
 	}
 
+	std::memset(data.get_ptr(), 0, maxSize);
+
 	return CELL_OK;
 }
 
@@ -2402,6 +2447,9 @@ error_code sceNpManagerRegisterCallback(vm::ptr<SceNpManagerCallback> callback, 
 		return SCE_NP_ERROR_INVALID_ARGUMENT;
 	}
 
+	nph->manager_cb = callback;
+	nph->manager_cb_arg = arg;
+
 	return CELL_OK;
 }
 
@@ -2416,6 +2464,8 @@ error_code sceNpManagerUnregisterCallback()
 		return SCE_NP_ERROR_NOT_INITIALIZED;
 	}
 
+	nph->manager_cb.set(0);
+
 	return CELL_OK;
 }
 
@@ -2427,7 +2477,7 @@ error_code sceNpManagerGetStatus(vm::ptr<s32> status)
 
 	if (!nph->is_NP_init)
 	{
-		return SCE_NP_ERROR_NOT_INITIALIZED;
+		//return SCE_NP_ERROR_NOT_INITIALIZED;
 	}
 
 	if (!status)
@@ -2448,7 +2498,7 @@ error_code sceNpManagerGetNetworkTime(vm::ptr<CellRtcTick> pTick)
 
 	if (!nph->is_NP_init)
 	{
-		return SCE_NP_ERROR_NOT_INITIALIZED;
+		//return SCE_NP_ERROR_NOT_INITIALIZED;
 	}
 
 	if (!pTick)
@@ -2466,22 +2516,22 @@ error_code sceNpManagerGetNetworkTime(vm::ptr<CellRtcTick> pTick)
 		return SCE_NP_ERROR_INVALID_STATE;
 	}
 
-	// FIXME: Get the network time
 	auto now    = std::chrono::system_clock::now();
-	pTick->tick = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+	// That's assuming epoch is unix epoch which is not actually standardized, god I hate you C++ std
+	pTick->tick = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count() + (62135596800 * 1000 * 1000);
 
 	return CELL_OK;
 }
 
 error_code sceNpManagerGetOnlineId(vm::ptr<SceNpOnlineId> onlineId)
 {
-	sceNp.todo("sceNpManagerGetOnlineId(onlineId=*0x%x)", onlineId);
+	sceNp.warning("sceNpManagerGetOnlineId(onlineId=*0x%x)", onlineId);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
 	if (!nph->is_NP_init)
 	{
-		return SCE_NP_ERROR_NOT_INITIALIZED;
+		//return SCE_NP_ERROR_NOT_INITIALIZED;
 	}
 
 	if (!onlineId)
@@ -2506,14 +2556,14 @@ error_code sceNpManagerGetOnlineId(vm::ptr<SceNpOnlineId> onlineId)
 
 error_code sceNpManagerGetNpId(ppu_thread& ppu, vm::ptr<SceNpId> npId)
 {
-	sceNp.todo("sceNpManagerGetNpId(npId=*0x%x)", npId);
+	sceNp.warning("sceNpManagerGetNpId(npId=*0x%x)", npId);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
-	if (!nph->is_NP_init)
-	{
-		return SCE_NP_ERROR_NOT_INITIALIZED;
-	}
+	// if (!nph->is_NP_init)
+	// {
+	// 	return SCE_NP_ERROR_NOT_INITIALIZED;
+	// }
 
 	if (!npId)
 	{
@@ -2652,6 +2702,12 @@ error_code sceNpManagerGetAccountRegion(vm::ptr<SceNpCountryCode> countryCode, v
 		return SCE_NP_ERROR_INVALID_STATE;
 	}
 
+	memset(countryCode.get_ptr(), 0, sizeof(countryCode));
+	countryCode->data[0] = 'u';
+	countryCode->data[1] = 's';
+
+	*language = CELL_SYSUTIL_LANG_ENGLISH_US;
+
 	return CELL_OK;
 }
 
@@ -2776,7 +2832,7 @@ error_code sceNpManagerGetPsHandle()
 
 error_code sceNpManagerRequestTicket(vm::cptr<SceNpId> npId, vm::cptr<char> serviceId, vm::cptr<void> cookie, u32 cookieSize, vm::cptr<char> entitlementId, u32 consumedCount)
 {
-	sceNp.todo("sceNpManagerRequestTicket(npId=*0x%x, serviceId=%s, cookie=*0x%x, cookieSize=%d, entitlementId=%s, consumedCount=%d)", npId, serviceId, cookie, cookieSize, entitlementId, consumedCount);
+	sceNp.error("sceNpManagerRequestTicket(npId=*0x%x, serviceId=%s, cookie=*0x%x, cookieSize=%d, entitlementId=%s, consumedCount=%d)", npId, serviceId, cookie, cookieSize, entitlementId, consumedCount);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -2785,7 +2841,7 @@ error_code sceNpManagerRequestTicket(vm::cptr<SceNpId> npId, vm::cptr<char> serv
 		return SCE_NP_ERROR_NOT_INITIALIZED;
 	}
 
-	if (!serviceId || !cookie || cookieSize > SCE_NP_COOKIE_MAX_SIZE || !entitlementId)
+	if (!npId || !serviceId || cookieSize > SCE_NP_COOKIE_MAX_SIZE)
 	{
 		return SCE_NP_AUTH_EINVALID_ARGUMENT;
 	}
@@ -2799,6 +2855,8 @@ error_code sceNpManagerRequestTicket(vm::cptr<SceNpId> npId, vm::cptr<char> serv
 	{
 		return SCE_NP_ERROR_INVALID_STATE;
 	}
+
+	nph->req_ticket(0x00020001, npId.get_ptr(), serviceId.get_ptr(), reinterpret_cast<const u8 *>(cookie.get_ptr()), cookieSize, entitlementId.get_ptr(), consumedCount);
 
 	return CELL_OK;
 }
@@ -2816,7 +2874,7 @@ error_code sceNpManagerRequestTicket2(vm::cptr<SceNpId> npId, vm::cptr<SceNpTick
 		return SCE_NP_ERROR_NOT_INITIALIZED;
 	}
 
-	if (!serviceId || !cookie || cookieSize > SCE_NP_COOKIE_MAX_SIZE || !entitlementId)
+	if (!npId || !serviceId || cookieSize > SCE_NP_COOKIE_MAX_SIZE)
 	{
 		return SCE_NP_AUTH_EINVALID_ARGUMENT;
 	}
@@ -2831,12 +2889,14 @@ error_code sceNpManagerRequestTicket2(vm::cptr<SceNpId> npId, vm::cptr<SceNpTick
 		return SCE_NP_ERROR_INVALID_STATE;
 	}
 
+	nph->req_ticket(0x00020001, npId.get_ptr(), serviceId.get_ptr(), reinterpret_cast<const u8 *>(cookie.get_ptr()), cookieSize, entitlementId.get_ptr(), consumedCount);
+
 	return CELL_OK;
 }
 
 error_code sceNpManagerGetTicket(vm::ptr<void> buffer, vm::ptr<u32> bufferSize)
 {
-	sceNp.todo("sceNpManagerGetTicket(buffer=*0x%x, bufferSize=*0x%x)", buffer, bufferSize);
+	sceNp.error("sceNpManagerGetTicket(buffer=*0x%x, bufferSize=*0x%x)", buffer, bufferSize);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -2849,6 +2909,21 @@ error_code sceNpManagerGetTicket(vm::ptr<void> buffer, vm::ptr<u32> bufferSize)
 	{
 		return SCE_NP_ERROR_INVALID_ARGUMENT;
 	}
+
+	const auto& ticket = nph->get_ticket();
+
+	if (!buffer)
+	{
+		*bufferSize = static_cast<u32>(ticket.size());
+		return CELL_OK;
+	}
+
+	if (*bufferSize < ticket.size())
+	{
+		return SCE_NP_ERROR_INVALID_ARGUMENT;
+	}
+
+	memcpy(buffer.get_ptr(), ticket.data(), ticket.size());
 
 	return CELL_OK;
 }
@@ -3233,7 +3308,7 @@ error_code sceNpScoreCreateTransactionCtx(s32 titleCtxId)
 		return SCE_NP_COMMUNITY_ERROR_INVALID_ONLINE_ID;
 	}
 
-	return CELL_OK;
+	return not_an_error(nph->create_score_transaction_context(titleCtxId));
 }
 
 error_code sceNpScoreDestroyTransactionCtx(s32 transId)
@@ -4309,6 +4384,11 @@ error_code sceNpSignalingCreateCtx(vm::ptr<SceNpId> npId, vm::ptr<SceNpSignaling
 	//	return SCE_NP_SIGNALING_ERROR_CTX_MAX;
 	//}
 
+	*ctx_id = nph->create_signaling_context(npId, handler, arg);
+
+	const auto sigh = g_fxo->get<named_thread<signaling_handler>>();
+	sigh->set_sig_cb(*ctx_id, handler, arg);
+
 	return CELL_OK;
 }
 
@@ -4323,12 +4403,17 @@ error_code sceNpSignalingDestroyCtx(u32 ctx_id)
 		return SCE_NP_SIGNALING_ERROR_NOT_INITIALIZED;
 	}
 
+	if (!nph->destroy_signaling_context(ctx_id))
+	{
+		return SCE_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
+	}
+
 	return CELL_OK;
 }
 
 error_code sceNpSignalingAddExtendedHandler(u32 ctx_id, vm::ptr<SceNpSignalingHandler> handler, vm::ptr<void> arg)
 {
-	sceNp.todo("sceNpSignalingAddExtendedHandler(ctx_id=%d, handler=*0x%x, arg=*0x%x)", ctx_id, handler, arg);
+	sceNp.warning("sceNpSignalingAddExtendedHandler(ctx_id=%d, handler=*0x%x, arg=*0x%x)", ctx_id, handler, arg);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -4336,6 +4421,9 @@ error_code sceNpSignalingAddExtendedHandler(u32 ctx_id, vm::ptr<SceNpSignalingHa
 	{
 		return SCE_NP_SIGNALING_ERROR_NOT_INITIALIZED;
 	}
+
+	const auto sigh = g_fxo->get<named_thread<signaling_handler>>();
+	sigh->set_ext_sig_cb(ctx_id, handler, arg);
 
 	return CELL_OK;
 }
@@ -4378,9 +4466,9 @@ error_code sceNpSignalingGetCtxOpt(u32 ctx_id, s32 optname, vm::ptr<s32> optval)
 	return CELL_OK;
 }
 
-error_code sceNpSignalingActivateConnection(u32 ctx_id, vm::ptr<SceNpId> npId, u32 conn_id)
+error_code sceNpSignalingActivateConnection(u32 ctx_id, vm::ptr<SceNpId> npId, vm::ptr<u32> conn_id)
 {
-	sceNp.todo("sceNpSignalingActivateConnection(ctx_id=%d, npId=*0x%x, conn_id=%d)", ctx_id, npId, conn_id);
+	sceNp.warning("sceNpSignalingActivateConnection(ctx_id=%d, npId=*0x%x, conn_id=*0x%x)", ctx_id, npId, conn_id);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -4393,6 +4481,12 @@ error_code sceNpSignalingActivateConnection(u32 ctx_id, vm::ptr<SceNpId> npId, u
 	{
 		return SCE_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
 	}
+
+	if (strncmp(nph->get_npid().handle.data, npId->handle.data, 16) == 0)
+		return SCE_NP_SIGNALING_ERROR_OWN_NP_ID;
+
+	const auto sigh = g_fxo->get<named_thread<signaling_handler>>();
+	*conn_id = sigh->init_sig_infos(npId.get_ptr());
 
 	return CELL_OK;
 }
@@ -4427,7 +4521,7 @@ error_code sceNpSignalingTerminateConnection(u32 ctx_id, u32 conn_id)
 
 error_code sceNpSignalingGetConnectionStatus(u32 ctx_id, u32 conn_id, vm::ptr<s32> conn_status, vm::ptr<np_in_addr> peer_addr, vm::ptr<np_in_port_t> peer_port)
 {
-	sceNp.todo("sceNpSignalingGetConnectionStatus(ctx_id=%d, conn_id=%d, conn_status=*0x%x, peer_addr=*0x%x, peer_port=*0x%x)", ctx_id, conn_id, conn_status, peer_addr, peer_port);
+	sceNp.warning("sceNpSignalingGetConnectionStatus(ctx_id=%d, conn_id=%d, conn_status=*0x%x, peer_addr=*0x%x, peer_port=*0x%x)", ctx_id, conn_id, conn_status, peer_addr, peer_port);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -4440,6 +4534,15 @@ error_code sceNpSignalingGetConnectionStatus(u32 ctx_id, u32 conn_id, vm::ptr<s3
 	{
 		return SCE_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
 	}
+
+	const auto sigh = g_fxo->get<named_thread<signaling_handler>>();
+	const auto si   = sigh->get_sig_infos(conn_id);
+
+	*conn_status = si.connStatus;
+	if (peer_addr)
+		(*peer_addr).np_s_addr = si.addr; // infos.addr is already BE
+	if (peer_port)
+		*peer_port = si.port;
 
 	return CELL_OK;
 }
@@ -4503,7 +4606,7 @@ error_code sceNpSignalingGetConnectionFromPeerAddress(u32 ctx_id, vm::ptr<np_in_
 
 error_code sceNpSignalingGetLocalNetInfo(u32 ctx_id, vm::ptr<SceNpSignalingNetInfo> info)
 {
-	sceNp.todo("sceNpSignalingGetLocalNetInfo(ctx_id=%d, info=*0x%x)", ctx_id, info);
+	sceNp.warning("sceNpSignalingGetLocalNetInfo(ctx_id=%d, info=*0x%x)", ctx_id, info);
 
 	const auto nph = g_fxo->get<named_thread<np_handler>>();
 
@@ -4512,11 +4615,19 @@ error_code sceNpSignalingGetLocalNetInfo(u32 ctx_id, vm::ptr<SceNpSignalingNetIn
 		return SCE_NP_SIGNALING_ERROR_NOT_INITIALIZED;
 	}
 
-	if (!info)
+	if (!info || info->size != sizeof(SceNpSignalingNetInfo))
 	{
-		// TODO: check info->size
 		return SCE_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
 	}
+
+	info->local_addr  = nph->get_local_ip_addr();
+	info->mapped_addr = nph->get_public_ip_addr();
+
+	// Pure speculation below
+	info->nat_status    = 0;
+	info->upnp_status   = 0;
+	info->npport_status = 0;
+	info->npport        = 3658;
 
 	return CELL_OK;
 }
@@ -4596,24 +4707,24 @@ error_code sceNpUtilCmpNpId(vm::ptr<SceNpId> id1, vm::ptr<SceNpId> id2)
 	}
 
 	// Unknown what this constant means
-	if (id1->reserved[0] != 1 || id2->reserved[0] != 1)
-	{
-		return SCE_NP_UTIL_ERROR_INVALID_NP_ID;
-	}
+	// if (id1->reserved[0] != 1 || id2->reserved[0] != 1)
+	// {
+	// 	return SCE_NP_UTIL_ERROR_INVALID_NP_ID;
+	// }
 
-	if (strncmp(id1->handle.data, id2->handle.data, 16) || id1->unk1[0] != id2->unk1[0])
+	if (strncmp(id1->handle.data, id2->handle.data, 16))// || id1->unk1[0] != id2->unk1[0])
 	{
 		return SCE_NP_UTIL_ERROR_NOT_MATCH;
 	}
 
-	if (id1->unk1[1] != id2->unk1[1])
-	{
-		// If either is zero they match
-		if (id1->opt[4] && id2->opt[4])
-		{
-			return SCE_NP_UTIL_ERROR_NOT_MATCH;
-		}
-	}
+	// if (id1->unk1[1] != id2->unk1[1])
+	// {
+	// 	// If either is zero they match
+	// 	if (id1->opt[4] && id2->opt[4])
+	// 	{
+	// 		return SCE_NP_UTIL_ERROR_NOT_MATCH;
+	// 	}
+	// }
 
 	return CELL_OK;
 }

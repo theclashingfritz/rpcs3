@@ -63,6 +63,17 @@ namespace utils
 #ifdef _WIN32
 		return ::VirtualAlloc(use_addr, size, MEM_RESERVE, PAGE_NOACCESS);
 #else
+		if (use_addr && reinterpret_cast<uptr>(use_addr) % 0x10000)
+		{
+			return nullptr;
+		}
+
+		if (!use_addr)
+		{
+			// Hack: Ensure aligned 64k allocations
+			size += 0x10000;
+		}
+
 		auto ptr = ::mmap(use_addr, size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
 
 		if (ptr == reinterpret_cast<void*>(-1))
@@ -74,6 +85,20 @@ namespace utils
 		{
 			::munmap(ptr, size);
 			return nullptr;
+		}
+
+		if (!use_addr && ptr)
+		{
+			// Continuation of the hack above
+			const auto misalign = reinterpret_cast<uptr>(ptr) % 0x10000;
+			::munmap(ptr, 0x10000 - misalign);
+
+			if (misalign)
+			{
+				::munmap(static_cast<u8*>(ptr) + size - misalign, misalign);
+			}
+
+			ptr = static_cast<u8*>(ptr) + (0x10000 - misalign);
 		}
 
 		return ptr;
@@ -141,8 +166,9 @@ namespace utils
 #endif
 	}
 
-	shm::shm(u32 size)
+	shm::shm(u32 size, u32 flags)
 		: m_size(::align(size, 0x10000))
+		, m_flags(flags)
 	{
 #ifdef _WIN32
 		m_handle = ::CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_EXECUTE_READWRITE, 0, m_size, NULL);
@@ -154,7 +180,7 @@ namespace utils
 #else
 		while ((m_file = ::shm_open("/rpcs3-mem1", O_RDWR | O_CREAT | O_EXCL, S_IWUSR | S_IRUSR)) == -1)
 		{
-			if (m_file == -1 && errno == EMFILE)
+			if (errno == EMFILE)
 			{
 				fmt::throw_exception("Too many open files. Raise the limit and try again.");
 			}

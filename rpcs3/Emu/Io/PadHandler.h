@@ -89,24 +89,22 @@ protected:
 	static long FindKeyCodeByString(const std::unordered_map<u64, std::string>& map, const std::string& name, bool fallback = true);
 
 	// Get new scaled value between 0 and 255 based on its minimum and maximum
-	static float ScaleStickInput(s32 raw_value, int minimum, int maximum);
+	static float ScaledInput(s32 raw_value, int minimum, int maximum);
 
 	// Get new scaled value between -255 and 255 based on its minimum and maximum
-	static float ScaleStickInput2(s32 raw_value, int minimum, int maximum);
+	static float ScaledInput2(s32 raw_value, int minimum, int maximum);
 
 	// Get normalized trigger value based on the range defined by a threshold
 	u16 NormalizeTriggerInput(u16 value, int threshold);
 
 	// normalizes a directed input, meaning it will correspond to a single "button" and not an axis with two directions
 	// the input values must lie in 0+
-	u16 NormalizeDirectedInput(s32 raw_value, s32 threshold, s32 maximum);
-
-	u16 NormalizeStickInput(u16 raw_value, int threshold, int multiplier, bool ignore_threshold = false);
+	u16 NormalizeDirectedInput(s32 raw_value, s32 threshold, s32 maximum) const;
 
 	// This function normalizes stick deadzone based on the DS3's deadzone, which is ~13%
 	// X and Y is expected to be in (-255) to 255 range, deadzone should be in terms of thumb stick range
 	// return is new x and y values in 0-255 range
-	std::tuple<u16, u16> NormalizeStickDeadzone(s32 inX, s32 inY, u32 deadzone);
+	std::tuple<u16, u16> NormalizeStickDeadzone(s32 inX, s32 inY, u32 deadzone) const;
 
 	// get clamped value between 0 and 255
 	static u16 Clamp0To255(f32 input);
@@ -123,8 +121,8 @@ protected:
 	static std::tuple<u16, u16> ConvertToSquirclePoint(u16 inX, u16 inY, int squircle_factor);
 
 public:
-	s32 thumb_min = 0;
-	s32 thumb_max = 255;
+	// s32 thumb_min = 0; // Unused. Make sure all handlers report 0+ values for sticks in get_button_values.
+	s32 thumb_max = 255; // NOTE: Better keep this positive
 	s32 trigger_min = 0;
 	s32 trigger_max = 255;
 	s32 vibration_min = 0;
@@ -143,6 +141,9 @@ public:
 
 	static std::string get_config_dir(pad_handler type, const std::string& title_id = "");
 	static std::string get_config_filename(int i, const std::string& title_id = "");
+
+	u16 NormalizeStickInput(u16 raw_value, int threshold, int multiplier, bool ignore_threshold = false) const;
+	void convert_stick_values(u16& x_out, u16& y_out, const s32& x_in, const s32& y_in, const s32& deadzone, const s32& padsquircling) const;
 
 	virtual bool Init() { return true; }
 	PadHandlerBase(pad_handler type = pad_handler::null);

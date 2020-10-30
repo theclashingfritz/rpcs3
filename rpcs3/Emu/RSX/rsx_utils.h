@@ -3,7 +3,6 @@
 #include "../system_config.h"
 #include "Utilities/address_range.h"
 #include "Utilities/geometry.h"
-#include "Utilities/asm.h"
 #include "gcm_enums.h"
 
 #include <memory>
@@ -32,9 +31,18 @@ namespace rsx
 
 	extern atomic_t<u64> g_rsx_shared_tag;
 
+	enum class problem_severity : u8
+	{
+		low,
+		moderate,
+		severe,
+		fatal
+	};
+
 	//Base for resources with reference counting
 	class ref_counted
 	{
+	protected:
 		atomic_t<s32> ref_count{ 0 }; // References held
 		atomic_t<u8> idle_time{ 0 };  // Number of times the resource has been tagged idle
 
@@ -107,8 +115,7 @@ namespace rsx
 		u32 pitch = 0;
 
 		rsx::surface_color_format color_format;
-		rsx::surface_depth_format depth_format;
-		bool depth_buffer_float;
+		rsx::surface_depth_format2 depth_format;
 
 		u16 width = 0;
 		u16 height = 0;
@@ -158,6 +165,7 @@ namespace rsx
 			{
 			default:
 				rsx_log.error("Invalid AV format 0x%x", format);
+				[[fallthrough]];
 			case 0: // CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8R8G8B8:
 			case 1: // CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8B8G8R8:
 				return CELL_GCM_TEXTURE_A8R8G8B8;
@@ -172,6 +180,7 @@ namespace rsx
 			{
 			default:
 				rsx_log.error("Invalid AV format 0x%x", format);
+				[[fallthrough]];
 			case 0: // CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8R8G8B8:
 			case 1: // CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8B8G8R8:
 				return 4;
@@ -236,22 +245,21 @@ namespace rsx
 		}
 	}
 
-	//
-	static inline u32 floor_log2(u32 value)
+	static constexpr u32 floor_log2(u32 value)
 	{
-		return value <= 1 ? 0 : utils::cntlz32(value, true) ^ 31;
+		return value <= 1 ? 0 : std::countl_zero(value) ^ 31;
 	}
 
-	static inline u32 ceil_log2(u32 value)
+	static constexpr u32 ceil_log2(u32 value)
 	{
-		return value <= 1 ? 0 : utils::cntlz32((value - 1) << 1, true) ^ 31;
+		return floor_log2(value) + u32{!!(value & (value - 1))};
 	}
 
-	static inline u32 next_pow2(u32 x)
+	static constexpr u32 next_pow2(u32 x)
 	{
 		if (x <= 2) return x;
 
-		return static_cast<u32>((1ULL << 32) >> utils::cntlz32(x - 1, true));
+		return static_cast<u32>((1ULL << 32) >> std::countl_zero(x - 1));
 	}
 
 	static inline bool fcmp(float a, float b, float epsilon = 0.000001f)
@@ -439,17 +447,11 @@ namespace rsx
 		}
 	}
 
-	void scale_image_nearest(void* dst, const void* src, u16 src_width, u16 src_height, u16 dst_pitch, u16 src_pitch, u8 element_size, u8 samples_u, u8 samples_v, bool swap_bytes = false);
-
 	void convert_scale_image(u8 *dst, AVPixelFormat dst_format, int dst_width, int dst_height, int dst_pitch,
 		const u8 *src, AVPixelFormat src_format, int src_width, int src_height, int src_pitch, int src_slice_h, bool bilinear);
 
 	void clip_image(u8 *dst, const u8 *src, int clip_x, int clip_y, int clip_w, int clip_h, int bpp, int src_pitch, int dst_pitch);
 	void clip_image_may_overlap(u8 *dst, const u8 *src, int clip_x, int clip_y, int clip_w, int clip_h, int bpp, int src_pitch, int dst_pitch, u8* buffer);
-
-	void convert_le_f32_to_be_d24(void *dst, void *src, u32 row_length_in_texels, u32 num_rows);
-	void convert_le_d24x8_to_be_d24x8(void *dst, void *src, u32 row_length_in_texels, u32 num_rows);
-	void convert_le_d24x8_to_le_f32(void *dst, void *src, u32 row_length_in_texels, u32 num_rows);
 
 	std::array<float, 4> get_constant_blend_colors();
 
@@ -736,12 +738,36 @@ namespace rsx
 		return result;
 	}
 
-	static inline void get_g8b8_r8g8_colormask(bool &red, bool &green, bool &blue, bool &alpha)
+	static inline void get_g8b8_r8g8_colormask(bool &red, bool &/*green*/, bool &blue, bool &alpha)
 	{
 		red = blue;
-		green = green;
 		blue = false;
 		alpha = false;
+	}
+
+	static inline void get_g8b8_clear_color(u8& red, u8& /*green*/, u8& blue, u8& /*alpha*/)
+	{
+		red = blue;
+	}
+
+	static inline u32 get_abgr8_colormask(u32 mask)
+	{
+		u32 result = 0;
+		if (mask & 0x10) result |= 0x40;
+		if (mask & 0x20) result |= 0x20;
+		if (mask & 0x40) result |= 0x10;
+		if (mask & 0x80) result |= 0x80;
+		return result;
+	}
+
+	static inline void get_abgr8_colormask(bool& red, bool& /*green*/, bool& blue, bool& /*alpha*/)
+	{
+		std::swap(red, blue);
+	}
+
+	static inline void get_abgr8_clear_color(u8& red, u8& /*green*/, u8& blue, u8& /*alpha*/)
+	{
+		std::swap(red, blue);
 	}
 
 	static inline color4f decode_border_color(u32 colorref)
@@ -769,6 +795,44 @@ namespace rsx
 		}
 
 		return bits / To(1u << frac);
+	}
+
+	static inline f32 decode_fp16(u16 bits)
+	{
+		if (bits == 0)
+		{
+			return 0.f;
+		}
+
+		// Extract components
+		unsigned int sign = (bits >> 15) & 1;
+		unsigned int exp = (bits >> 10) & 0x1f;
+		unsigned int mantissa = bits & 0x3ff;
+
+		float base = (sign != 0) ? -1.f : 1.f;
+		float scale;
+
+		if (exp == 0x1F)
+		{
+			// specials (nan, inf)
+			u32 nan = 0x7F800000 | mantissa;
+			nan |= (sign << 31);
+			return std::bit_cast<f32>(nan);
+		}
+		else if (exp > 0)
+		{
+			// normal number, borrows a '1' from the hidden mantissa bit
+			base *= std::exp2f(f32(exp) - 15.f);
+			scale = (float(mantissa) / 1024.f) + 1.f;
+		}
+		else
+		{
+			// subnormal number, borrows a '0' from the hidden mantissa bit
+			base *= std::exp2f(1.f - 15.f);
+			scale = float(mantissa) / 1024.f;
+		}
+
+		return base * scale;
 	}
 
 	template <int N>
@@ -891,7 +955,7 @@ namespace rsx
 			reserve(initial_size);
 			_size = initial_size;
 
-			for (int n = 0; n < initial_size; ++n)
+			for (u32 n = 0; n < initial_size; ++n)
 			{
 				_data[n] = val;
 			}

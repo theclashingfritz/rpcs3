@@ -21,7 +21,7 @@ static error_code overlay_load_module(vm::ptr<u32> ovlmid, const std::string& vp
 {
 	if (!src)
 	{
-		auto [fs_error, ppath, lv2_file] = lv2_file::open(vpath, 0, 0);
+		auto [fs_error, ppath, path, lv2_file, type] = lv2_file::open(vpath, 0, 0);
 
 		if (fs_error)
 		{
@@ -31,7 +31,7 @@ static error_code overlay_load_module(vm::ptr<u32> ovlmid, const std::string& vp
 		src = std::move(lv2_file);
 	}
 
-	const ppu_exec_object obj = decrypt_self(std::move(src), g_fxo->get<loaded_npdrm_keys>()->devKlic.data());
+	const ppu_exec_object obj = decrypt_self(std::move(src), g_fxo->get<loaded_npdrm_keys>()->devKlic.load()._bytes);
 
 	if (obj != elf_error::ok)
 	{

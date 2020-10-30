@@ -7,8 +7,8 @@ PR_NUMBER="$SYSTEM_PULLREQUEST_PULLREQUESTID"
 
 # Resource/dependency URLs
 # Qt mirrors can be volatile and slow, so we list 2
-#QT_HOST="http://mirrors.ocf.berkeley.edu/qt/"
-QT_HOST="http://qt.mirror.constant.com/"
+QT_HOST="http://mirrors.ocf.berkeley.edu/qt/"
+#QT_HOST="http://qt.mirror.constant.com/"
 QT_URL_VER=$(echo "$QT_VER" | sed "s/\.//g")
 QT_PREFIX="online/qtsdkrepository/windows_x86/desktop/qt5_${QT_URL_VER}/qt.qt5.${QT_URL_VER}.win64_msvc2017_64/${QT_VER}-0-${QT_DATE}"
 QT_SUFFIX="-Windows-Windows_10-MSVC2017-Windows-Windows_10-X86_64.7z"
@@ -17,10 +17,8 @@ QT_WINE_URL="${QT_HOST}${QT_PREFIX}qtwinextras${QT_SUFFIX}"
 QT_DECL_URL="${QT_HOST}${QT_PREFIX}qtdeclarative${QT_SUFFIX}"
 QT_TOOL_URL="${QT_HOST}${QT_PREFIX}qttools${QT_SUFFIX}"
 LLVMLIBS_URL='https://github.com/RPCS3/llvm-mirror/releases/download/custom-build-win/llvmlibs_mt.7z'
-LLVM_SHA="773273312b6bfe0c361b3780e175ab2935f8d10558431420dee2a1414ee965d0"
 GLSLANG_URL='https://github.com/RPCS3/glslang/releases/download/custom-build-win/glslanglibs_mt.7z'
-GLSLANG_SHA="b2f47a20239eddd423257c10258e1c7889a5bb7d66773460e3a87b4dbead7c1d"
-VULKAN_SDK_URL="https://sdk.lunarg.com/sdk/download/${VULKAN_VER}/windows/VulkanSDK-${VULKAN_VER}-Installer.exe"
+VULKAN_SDK_URL="https://www.dropbox.com/s/kn005de7gsv5whe/VulkanSDK-1.2.154.1-Installer.exe"
 
 DEP_URLS="         \
     $QT_BASE_URL   \
@@ -37,7 +35,7 @@ DEP_URLS="         \
 # Pull all the submodules except llvm, since it is built separately and we just download that build
 # Note: Tried to use git submodule status, but it takes over 20 seconds
 # shellcheck disable=SC2046
-git submodule -q update --init $(awk '/path/ && !/llvm/ { print $3 }' .gitmodules)
+git submodule -q update --init --depth 1 $(awk '/path/ && !/llvm/ { print $3 }' .gitmodules)
 
 # Git bash doesn't have rev, so here it is
 rev()
@@ -76,8 +74,8 @@ for url in $DEP_URLS; do
     # shellcheck disable=SC1003
     case "$url" in
     *qt*) checksum=$(curl -L "${url}.sha1"); algo="sha1"; outDir='C:\Qt\' ;;
-    *llvm*) checksum="$LLVM_SHA"; algo="sha256"; outDir="." ;;
-    *glslang*) checksum="$GLSLANG_SHA"; algo=sha256; outDir="./lib/Release - LLVM-x64" ;;
+    *llvm*) checksum=$(curl -L "${url}.sha256"); algo="sha256"; outDir="." ;;
+    *glslang*) checksum=$(curl -L "${url}.sha256"); algo="sha256"; outDir="./lib/Release - LLVM-x64" ;;
     *Vulkan*)
         # Vulkan setup needs to be run in batch environment
         # Need to subshell this or else it doesn't wait

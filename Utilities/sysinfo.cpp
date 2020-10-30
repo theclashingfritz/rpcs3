@@ -2,6 +2,7 @@
 #include "StrFmt.h"
 #include "File.h"
 #include "Emu/system_config.h"
+#include "Thread.h"
 
 #ifdef _WIN32
 #include "windows.h"
@@ -60,6 +61,13 @@ bool utils::has_avx512()
 {
 	// Check AVX512F, AVX512CD, AVX512DQ, AVX512BW, AVX512VL extensions (Skylake-X level support)
 	static const bool g_value = get_cpuid(0, 0)[0] >= 0x7 && (get_cpuid(7, 0)[1] & 0xd0030000) == 0xd0030000 && (get_cpuid(1, 0)[2] & 0x0C000000) == 0x0C000000 && (get_xgetbv(0) & 0xe6) == 0xe6;
+	return g_value;
+}
+
+bool utils::has_avx512_icl()
+{
+	// Check AVX512IFMA, AVX512VBMI, AVX512VBMI2, AVX512VPOPCNTDQ, AVX512BITALG, AVX512VNNI, AVX512VPCLMULQDQ, AVX512GFNI, AVX512VAES (Icelake-client level support)
+	static const bool g_value = has_avx512() && (get_cpuid(7, 0)[1] & 0x00200000) == 0x00200000 && (get_cpuid(7, 0)[2] & 0x00005f42) == 0x00005f42;
 	return g_value;
 }
 
@@ -144,12 +152,16 @@ std::string utils::get_system_info()
 	{
 		result += " | AVX";
 
-		if (has_avx2())
-		{
-			result += '+';
-		}
-
 		if (has_avx512())
+		{
+			result += "-512";
+
+			if (has_avx512_icl())
+			{
+				result += '+';
+			}
+		}
+		else if (has_avx2())
 		{
 			result += '+';
 		}
@@ -283,36 +295,47 @@ ullong utils::get_tsc_freq()
 			return round_tsc(freq.QuadPart * 1024);
 
 		const ullong timer_freq = freq.QuadPart;
-		Sleep(1);
 #else
 		const ullong timer_freq = 1'000'000'000;
-		ullong sec_base = 0;
-		usleep(200);
 #endif
 
 		// Calibrate TSC
 		constexpr int samples = 40;
 		ullong rdtsc_data[samples];
 		ullong timer_data[samples];
+		ullong error_data[samples];
+
+		// Narrow thread affinity to a single core
+		const u64 old_aff = thread_ctrl::get_thread_affinity_mask();
+		thread_ctrl::set_thread_affinity_mask(old_aff & (0 - old_aff));
+
+#ifndef _WIN32
+		struct timespec ts0;
+		clock_gettime(CLOCK_MONOTONIC, &ts0);
+		ullong sec_base = ts0.tv_sec;
+#endif
 
 		for (int i = 0; i < samples; i++)
 		{
-			rdtsc_data[i] = (_mm_lfence(), __rdtsc());
-
 #ifdef _WIN32
+			Sleep(1);
+			error_data[i] = (_mm_lfence(), __rdtsc());
 			LARGE_INTEGER ctr;
 			QueryPerformanceCounter(&ctr);
+			rdtsc_data[i] = (_mm_lfence(), __rdtsc());
 			timer_data[i] = ctr.QuadPart;
-			Sleep(1);
 #else
+			usleep(200);
+			error_data[i] = (_mm_lfence(), __rdtsc());
 			struct timespec ts;
 			clock_gettime(CLOCK_MONOTONIC, &ts);
-			if (i == 0)
-				sec_base = ts.tv_sec;
+			rdtsc_data[i] = (_mm_lfence(), __rdtsc());
 			timer_data[i] = ts.tv_nsec + (ts.tv_sec - sec_base) * 1'000'000'000;
-			usleep(200);
 #endif
 		}
+
+		// Restore main thread affinity
+		thread_ctrl::set_thread_affinity_mask(old_aff);
 
 		// Compute average TSC
 		ullong acc = 0;

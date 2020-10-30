@@ -25,8 +25,8 @@ if [ "$COMPILER" = "gcc" ]; then
     export CXX=${GXX_BINARY}
     export LINKER=gold
     # We need to set the following variables for LTO to link properly
-    export AR=/usr/bin/gcc-ar-9
-    export RANLIB=/usr/bin/gcc-ranlib-9
+    export AR=/usr/bin/gcc-ar-$GCCVER
+    export RANLIB=/usr/bin/gcc-ranlib-$GCCVER
     export CFLAGS="-fuse-linker-plugin"
 else
     export CC=${CLANG_BINARY}
@@ -40,13 +40,15 @@ export CFLAGS="$CFLAGS -fuse-ld=${LINKER}"
 
 cmake ..                                               \
     -DCMAKE_INSTALL_PREFIX=/usr                        \
-    -DBUILD_LLVM_SUBMODULE=OFF -DUSE_COTIRE=OFF        \
+    -DBUILD_LLVM_SUBMODULE=OFF                         \
     -DLLVM_DIR=llvmlibs/lib/cmake/llvm/                \
     -DUSE_NATIVE_INSTRUCTIONS=OFF                      \
+    -DUSE_PRECOMPILED_HEADERS=OFF                      \
     -DCMAKE_C_FLAGS="$CFLAGS"                          \
     -DCMAKE_CXX_FLAGS="$CFLAGS"                        \
     -DCMAKE_AR="$AR"                                   \
     -DCMAKE_RANLIB="$RANLIB"                           \
+    -DUSE_SYSTEM_CURL=ON                               \
     -G Ninja
 
 ninja; build_status=$?;

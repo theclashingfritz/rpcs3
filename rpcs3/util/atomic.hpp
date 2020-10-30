@@ -18,15 +18,20 @@ enum class atomic_wait_timeout : u64
 struct atomic_storage_futex
 {
 private:
-	template <typename T>
+	template <typename T, std::size_t Align>
 	friend class atomic_t;
 
-	static void wait(const void* data, std::size_t size, u64 old_value, u64 timeout, u64 mask);
+	static void
+#ifdef _WIN32
+	__vectorcall
+#endif
+	wait(const void* data, std::size_t size, __m128i old128, u64 timeout, __m128i mask128);
 	static void notify_one(const void* data);
 	static void notify_all(const void* data);
 
 public:
 	static void set_wait_callback(bool(*cb)(const void* data));
+	static void set_notify_callback(void(*cb)(const void* data, u64 progress));
 	static void raw_notify(const void* data);
 };
 
@@ -243,6 +248,7 @@ struct atomic_storage<T, 1> : atomic_storage<T, 0>
 
 	static inline T load(const T& dest)
 	{
+		std::atomic_thread_fence(std::memory_order_acquire);
 		const char value = *reinterpret_cast<const volatile char*>(&dest);
 		std::atomic_thread_fence(std::memory_order_acquire);
 		return std::bit_cast<T>(value);
@@ -252,6 +258,7 @@ struct atomic_storage<T, 1> : atomic_storage<T, 0>
 	{
 		std::atomic_thread_fence(std::memory_order_release);
 		*reinterpret_cast<volatile char*>(&dest) = std::bit_cast<char>(value);
+		std::atomic_thread_fence(std::memory_order_release);
 	}
 
 	static inline T exchange(T& dest, T value)
@@ -305,6 +312,7 @@ struct atomic_storage<T, 2> : atomic_storage<T, 0>
 
 	static inline T load(const T& dest)
 	{
+		std::atomic_thread_fence(std::memory_order_acquire);
 		const short value = *reinterpret_cast<const volatile short*>(&dest);
 		std::atomic_thread_fence(std::memory_order_acquire);
 		return std::bit_cast<T>(value);
@@ -314,6 +322,7 @@ struct atomic_storage<T, 2> : atomic_storage<T, 0>
 	{
 		std::atomic_thread_fence(std::memory_order_release);
 		*reinterpret_cast<volatile short*>(&dest) = std::bit_cast<short>(value);
+		std::atomic_thread_fence(std::memory_order_release);
 	}
 
 	static inline T exchange(T& dest, T value)
@@ -367,7 +376,7 @@ struct atomic_storage<T, 2> : atomic_storage<T, 0>
 	{
 		bool result;
 		ushort _bit = static_cast<ushort>(bit);
-		__asm__("lock btsw %2, %0\n" "setc %1" : "+m" (dest), "=r" (result) : "Ir" (_bit) : "cc");
+		__asm__("lock btsw %2, %0\n" : "+m" (dest), "=@ccc" (result) : "Ir" (_bit) : "cc");
 		return result;
 	}
 
@@ -375,7 +384,7 @@ struct atomic_storage<T, 2> : atomic_storage<T, 0>
 	{
 		bool result;
 		ushort _bit = static_cast<ushort>(bit);
-		__asm__("lock btrw %2, %0\n" "setc %1" : "+m" (dest), "=r" (result) : "Ir" (_bit) : "cc");
+		__asm__("lock btrw %2, %0\n": "+m" (dest), "=@ccc" (result) : "Ir" (_bit) : "cc");
 		return result;
 	}
 
@@ -383,7 +392,7 @@ struct atomic_storage<T, 2> : atomic_storage<T, 0>
 	{
 		bool result;
 		ushort _bit = static_cast<ushort>(bit);
-		__asm__("lock btcw %2, %0\n" "setc %1" : "+m" (dest), "=r" (result) : "Ir" (_bit) : "cc");
+		__asm__("lock btcw %2, %0\n": "+m" (dest), "=@ccc" (result) : "Ir" (_bit) : "cc");
 		return result;
 	}
 #endif
@@ -411,6 +420,7 @@ struct atomic_storage<T, 4> : atomic_storage<T, 0>
 
 	static inline T load(const T& dest)
 	{
+		std::atomic_thread_fence(std::memory_order_acquire);
 		const long value = *reinterpret_cast<const volatile long*>(&dest);
 		std::atomic_thread_fence(std::memory_order_acquire);
 		return std::bit_cast<T>(value);
@@ -420,6 +430,7 @@ struct atomic_storage<T, 4> : atomic_storage<T, 0>
 	{
 		std::atomic_thread_fence(std::memory_order_release);
 		*reinterpret_cast<volatile long*>(&dest) = std::bit_cast<long>(value);
+		std::atomic_thread_fence(std::memory_order_release);
 	}
 
 	static inline T exchange(T& dest, T value)
@@ -488,21 +499,21 @@ struct atomic_storage<T, 4> : atomic_storage<T, 0>
 	static inline bool bts(T& dest, uint bit)
 	{
 		bool result;
-		__asm__("lock btsl %2, %0\n" "setc %1" : "+m" (dest), "=r" (result) : "Ir" (bit) : "cc");
+		__asm__("lock btsl %2, %0\n" : "+m" (dest), "=@ccc" (result) : "Ir" (bit) : "cc");
 		return result;
 	}
 
 	static inline bool btr(T& dest, uint bit)
 	{
 		bool result;
-		__asm__("lock btrl %2, %0\n" "setc %1" : "+m" (dest), "=r" (result) : "Ir" (bit) : "cc");
+		__asm__("lock btrl %2, %0\n" : "+m" (dest), "=@ccc" (result) : "Ir" (bit) : "cc");
 		return result;
 	}
 
 	static inline bool btc(T& dest, uint bit)
 	{
 		bool result;
-		__asm__("lock btcl %2, %0\n" "setc %1" : "+m" (dest), "=r" (result) : "Ir" (bit) : "cc");
+		__asm__("lock btcl %2, %0\n" : "+m" (dest), "=@ccc" (result) : "Ir" (bit) : "cc");
 		return result;
 	}
 #endif
@@ -530,6 +541,7 @@ struct atomic_storage<T, 8> : atomic_storage<T, 0>
 
 	static inline T load(const T& dest)
 	{
+		std::atomic_thread_fence(std::memory_order_acquire);
 		const llong value = *reinterpret_cast<const volatile llong*>(&dest);
 		std::atomic_thread_fence(std::memory_order_acquire);
 		return std::bit_cast<T>(value);
@@ -539,6 +551,7 @@ struct atomic_storage<T, 8> : atomic_storage<T, 0>
 	{
 		std::atomic_thread_fence(std::memory_order_release);
 		*reinterpret_cast<volatile llong*>(&dest) = std::bit_cast<llong>(value);
+		std::atomic_thread_fence(std::memory_order_release);
 	}
 
 	static inline T exchange(T& dest, T value)
@@ -608,7 +621,7 @@ struct atomic_storage<T, 8> : atomic_storage<T, 0>
 	{
 		bool result;
 		ullong _bit = bit;
-		__asm__("lock btsq %2, %0\n" "setc %1" : "+m" (dest), "=r" (result) : "Ir" (_bit) : "cc");
+		__asm__("lock btsq %2, %0\n" : "+m" (dest), "=@ccc" (result) : "Ir" (_bit) : "cc");
 		return result;
 	}
 
@@ -616,7 +629,7 @@ struct atomic_storage<T, 8> : atomic_storage<T, 0>
 	{
 		bool result;
 		ullong _bit = bit;
-		__asm__("lock btrq %2, %0\n" "setc %1" : "+m" (dest), "=r" (result) : "Ir" (_bit) : "cc");
+		__asm__("lock btrq %2, %0\n" : "+m" (dest), "=@ccc" (result) : "Ir" (_bit) : "cc");
 		return result;
 	}
 
@@ -624,7 +637,7 @@ struct atomic_storage<T, 8> : atomic_storage<T, 0>
 	{
 		bool result;
 		ullong _bit = bit;
-		__asm__("lock btcq %2, %0\n" "setc %1" : "+m" (dest), "=r" (result) : "Ir" (_bit) : "cc");
+		__asm__("lock btcq %2, %0\n" : "+m" (dest), "=@ccc" (result) : "Ir" (_bit) : "cc");
 		return result;
 	}
 #endif
@@ -634,18 +647,19 @@ template <typename T>
 struct atomic_storage<T, 16> : atomic_storage<T, 0>
 {
 #ifdef _MSC_VER
+	static inline T load(const T& dest)
+	{
+		std::atomic_thread_fence(std::memory_order_acquire);
+		__m128i val = _mm_load_si128(reinterpret_cast<const __m128i*>(&dest));
+		std::atomic_thread_fence(std::memory_order_acquire);
+		return std::bit_cast<T>(val);
+	}
+
 	static inline bool compare_exchange(T& dest, T& comp, T exch)
 	{
 		struct alignas(16) llong2 { llong ll[2]; };
 		const llong2 _exch = std::bit_cast<llong2>(exch);
 		return _InterlockedCompareExchange128(reinterpret_cast<volatile llong*>(&dest), _exch.ll[1], _exch.ll[0], reinterpret_cast<llong*>(&comp)) != 0;
-	}
-
-	static inline T load(const T& dest)
-	{
-		struct alignas(16) llong2 { llong ll[2]; } result{};
-		_InterlockedCompareExchange128(reinterpret_cast<volatile llong*>(&const_cast<T&>(dest)), result.ll[1], result.ll[0], result.ll);
-		return std::bit_cast<T>(result);
 	}
 
 	static inline T exchange(T& dest, T value)
@@ -666,7 +680,79 @@ struct atomic_storage<T, 16> : atomic_storage<T, 0>
 
 	static inline void release(T& dest, T value)
 	{
+		std::atomic_thread_fence(std::memory_order_release);
+		_mm_store_si128(reinterpret_cast<__m128i*>(&dest), std::bit_cast<__m128i>(value));
+		std::atomic_thread_fence(std::memory_order_release);
+	}
+#else
+	static inline T load(const T& dest)
+	{
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		__m128i val = _mm_load_si128(reinterpret_cast<const __m128i*>(&dest));
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		return std::bit_cast<T>(val);
+	}
+
+	static inline bool compare_exchange(T& dest, T& comp, T exch)
+	{
+		bool result;
+		ullong cmp_lo = 0;
+		ullong cmp_hi = 0;
+		ullong exc_lo = 0;
+		ullong exc_hi = 0;
+
+		if constexpr (std::is_same_v<T, u128> || std::is_same_v<T, s128>)
+		{
+			cmp_lo = comp;
+			cmp_hi = comp >> 64;
+			exc_lo = exch;
+			exc_hi = exch >> 64;
+		}
+		else
+		{
+			std::memcpy(&cmp_lo, reinterpret_cast<char*>(&comp) + 0, 8);
+			std::memcpy(&cmp_hi, reinterpret_cast<char*>(&comp) + 8, 8);
+			std::memcpy(&exc_lo, reinterpret_cast<char*>(&exch) + 0, 8);
+			std::memcpy(&exc_hi, reinterpret_cast<char*>(&exch) + 8, 8);
+		}
+
+		__asm__ volatile("lock cmpxchg16b %1;"
+			: "=@ccz" (result)
+			, "+m" (dest)
+			, "+d" (cmp_hi)
+			, "+a" (cmp_lo)
+			: "c" (exc_hi)
+			, "b" (exc_lo)
+			: "cc");
+
+		if constexpr (std::is_same_v<T, u128> || std::is_same_v<T, s128>)
+		{
+			comp = T{cmp_hi} << 64 | cmp_lo;
+		}
+		else
+		{
+			std::memcpy(reinterpret_cast<char*>(&comp) + 0, &cmp_lo, 8);
+			std::memcpy(reinterpret_cast<char*>(&comp) + 8, &cmp_hi, 8);
+		}
+
+		return result;
+	}
+
+	static inline T exchange(T& dest, T value)
+	{
+		return std::bit_cast<T>(__sync_lock_test_and_set(reinterpret_cast<u128*>(&dest), std::bit_cast<u128>(value)));
+	}
+
+	static inline void store(T& dest, T value)
+	{
 		exchange(dest, value);
+	}
+
+	static inline void release(T& dest, T value)
+	{
+		__atomic_thread_fence(__ATOMIC_RELEASE);
+		_mm_store_si128(reinterpret_cast<__m128i*>(&dest), std::bit_cast<__m128i>(value));
+		__atomic_thread_fence(__ATOMIC_RELEASE);
 	}
 #endif
 
@@ -674,7 +760,7 @@ struct atomic_storage<T, 16> : atomic_storage<T, 0>
 };
 
 // Atomic type with lock-free and standard layout guarantees (and appropriate limitations)
-template <typename T>
+template <typename T, std::size_t Align = alignof(T)>
 class atomic_t
 {
 protected:
@@ -684,7 +770,7 @@ protected:
 
 	static_assert(alignof(type) == sizeof(type), "atomic_t<> error: unexpected alignment, use alignas() if necessary");
 
-	type m_data;
+	alignas(Align) type m_data;
 
 public:
 	atomic_t() noexcept = default;
@@ -1140,10 +1226,36 @@ public:
 		return atomic_storage<type>::btr(m_data, bit);
 	}
 
-	template <u64 Mask = 0xffffffffffffffff>
+	// Timeout is discouraged
 	void wait(type old_value, atomic_wait_timeout timeout = atomic_wait_timeout::inf) const noexcept
 	{
-		atomic_storage_futex::wait(&m_data, sizeof(T), std::bit_cast<get_uint_t<sizeof(T)>>(old_value), static_cast<u64>(timeout), Mask);
+		if constexpr (sizeof(T) <= 8)
+		{
+			const __m128i old = _mm_cvtsi64_si128(std::bit_cast<get_uint_t<sizeof(T)>>(old_value));
+			atomic_storage_futex::wait(&m_data, sizeof(T), old, static_cast<u64>(timeout), _mm_set1_epi64x(-1));
+		}
+		else if constexpr (sizeof(T) == 16)
+		{
+			const __m128i old = std::bit_cast<__m128i>(old_value);
+			atomic_storage_futex::wait(&m_data, sizeof(T), old, static_cast<u64>(timeout), _mm_set1_epi64x(-1));
+		}
+	}
+
+	// Overload with mask (only selected bits are checked), timeout is discouraged
+	void wait(type old_value, type mask_value, atomic_wait_timeout timeout = atomic_wait_timeout::inf)
+	{
+		if constexpr (sizeof(T) <= 8)
+		{
+			const __m128i old = _mm_cvtsi64_si128(std::bit_cast<get_uint_t<sizeof(T)>>(old_value));
+			const __m128i mask = _mm_cvtsi64_si128(std::bit_cast<get_uint_t<sizeof(T)>>(mask_value));
+			atomic_storage_futex::wait(&m_data, sizeof(T), old, static_cast<u64>(timeout), mask);
+		}
+		else if constexpr (sizeof(T) == 16)
+		{
+			const __m128i old = std::bit_cast<__m128i>(old_value);
+			const __m128i mask = std::bit_cast<__m128i>(mask_value);
+			atomic_storage_futex::wait(&m_data, sizeof(T), old, static_cast<u64>(timeout), mask);
+		}
 	}
 
 	void notify_one() noexcept
@@ -1176,7 +1288,6 @@ class atomic_with_lock_bit
 	static_assert(std::is_pointer_v<T> == (BitWidth == 0), "BitWidth should be 0 for pointers");
 	static_assert(!std::is_pointer_v<T> || (alignof(std::remove_pointer_t<T>) >= 4), "Pointer type should have align 4 or more");
 
-	// Use the most significant bit as a mutex
 	atomic_t<type> m_data;
 
 public:
@@ -1255,7 +1366,6 @@ public:
 					// Try to set dirty bit if not set already
 					if (!m_data.compare_and_swap_test(old_val, old_val | c_dirty))
 					{
-						// Situation changed
 						continue;
 					}
 				}
@@ -1301,6 +1411,7 @@ public:
 			{
 				if (!m_data.compare_and_swap_test(old_val, old_val | c_dirty))
 				{
+					old_val = m_data.load();
 					continue;
 				}
 			}
@@ -1314,6 +1425,11 @@ public:
 
 	void store(T value)
 	{
+		static_cast<void>(exchange(value));
+	}
+
+	T exchange(T value)
+	{
 		type old_val = m_data.load();
 
 		while (is_locked(old_val) || !m_data.compare_and_swap_test(old_val, clamp_value(reinterpret_cast<type>(value)))) [[unlikely]]
@@ -1322,6 +1438,7 @@ public:
 			{
 				if (!m_data.compare_and_swap_test(old_val, old_val | c_dirty))
 				{
+					old_val = m_data.load();
 					continue;
 				}
 			}
@@ -1329,6 +1446,51 @@ public:
 			m_data.wait(old_val);
 			old_val = m_data.load();
 		}
+
+		return reinterpret_cast<T>(clamp_value(old_val));
+	}
+
+	T compare_and_swap(T cmp, T exch)
+	{
+		static_cast<void>(compare_exchange(cmp, exch));
+		return cmp;
+	}
+
+	bool compare_and_swap_test(T cmp, T exch)
+	{
+		return compare_exchange(cmp, exch);
+	}
+
+	bool compare_exchange(T& cmp_and_old, T exch)
+	{
+		type old_val = m_data.load();
+		type expected = clamp_value(reinterpret_cast<type>(cmp_and_old));
+		type new_val = clamp_value(reinterpret_cast<type>(exch));
+
+		while (is_locked(old_val) || (old_val == expected && !m_data.compare_and_swap_test(expected, new_val))) [[unlikely]]
+		{
+			if (old_val == expected)
+			{
+				old_val = m_data.load();
+				continue;
+			}
+
+			if ((old_val & c_dirty) == 0)
+			{
+				if (!m_data.compare_and_swap_test(old_val, old_val | c_dirty))
+				{
+					old_val = m_data.load();
+					continue;
+				}
+			}
+
+			m_data.wait(old_val);
+			old_val = m_data.load();
+		}
+
+		cmp_and_old = reinterpret_cast<T>(clamp_value(old_val));
+
+		return clamp_value(old_val) == expected;
 	}
 
 	template <typename F, typename RT = std::invoke_result_t<F, T&>>
@@ -1345,6 +1507,7 @@ public:
 				{
 					if (!m_data.compare_and_swap_test(old, old | c_dirty))
 					{
+						old = m_data.load();
 						continue;
 					}
 				}

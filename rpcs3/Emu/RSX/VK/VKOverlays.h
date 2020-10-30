@@ -33,7 +33,7 @@ namespace vk
 		std::unique_ptr<vk::framebuffer> m_draw_fbo;
 		vk::data_heap m_vao;
 		vk::data_heap m_ubo;
-		vk::render_device* m_device = nullptr;
+		const vk::render_device* m_device = nullptr;
 
 		std::string vs_src;
 		std::string fs_src;
@@ -164,7 +164,7 @@ namespace vk
 			return fs_inputs;
 		}
 
-		virtual void get_dynamic_state_entries(VkDynamicState* /*state_descriptors*/, VkPipelineDynamicStateCreateInfo& /*info*/)
+		virtual void get_dynamic_state_entries(std::vector<VkDynamicState>& /*state_descriptors*/)
 		{}
 
 		virtual std::vector<VkPushConstantRange> get_push_constants()
@@ -207,14 +207,15 @@ namespace vk
 			shader_stages[1].module = m_fragment_shader.get_handle();
 			shader_stages[1].pName = "main";
 
-			VkDynamicState dynamic_state_descriptors[VK_DYNAMIC_STATE_RANGE_SIZE] = {};
+			std::vector<VkDynamicState> dynamic_state_descriptors;
+			dynamic_state_descriptors.push_back(VK_DYNAMIC_STATE_VIEWPORT);
+			dynamic_state_descriptors.push_back(VK_DYNAMIC_STATE_SCISSOR);
+			get_dynamic_state_entries(dynamic_state_descriptors);
+
 			VkPipelineDynamicStateCreateInfo dynamic_state_info = {};
 			dynamic_state_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-			dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_VIEWPORT;
-			dynamic_state_descriptors[dynamic_state_info.dynamicStateCount++] = VK_DYNAMIC_STATE_SCISSOR;
-
-			get_dynamic_state_entries(dynamic_state_descriptors, dynamic_state_info);
-			dynamic_state_info.pDynamicStates = dynamic_state_descriptors;
+			dynamic_state_info.dynamicStateCount = ::size32(dynamic_state_descriptors);
+			dynamic_state_info.pDynamicStates = dynamic_state_descriptors.data();
 
 			VkVertexInputBindingDescription vb = { 0, 16, VK_VERTEX_INPUT_RATE_VERTEX };
 			VkVertexInputAttributeDescription via = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0 };
@@ -250,7 +251,7 @@ namespace vk
 
 			CHECK_RESULT(vkCreateGraphicsPipelines(*m_device, nullptr, 1, &info, NULL, &pipeline));
 
-			auto program = std::make_unique<vk::glsl::program>(*m_device, pipeline, get_vertex_inputs(), get_fragment_inputs());
+			auto program = std::make_unique<vk::glsl::program>(*m_device, pipeline, m_pipeline_layout, get_vertex_inputs(), get_fragment_inputs());
 			auto result = program.get();
 			m_program_cache[storage_key] = std::move(program);
 
@@ -304,7 +305,7 @@ namespace vk
 			vkCmdBindVertexBuffers(cmd, 0, 1, &buffers, &offsets);
 		}
 
-		void create(vk::render_device &dev)
+		virtual void create(const vk::render_device &dev)
 		{
 			if (!initialized)
 			{
@@ -315,7 +316,7 @@ namespace vk
 			}
 		}
 
-		void destroy()
+		virtual void destroy()
 		{
 			if (initialized)
 			{
@@ -392,68 +393,6 @@ namespace vk
 		{
 			std::vector<vk::image_view*> views = { src };
 			run(cmd, viewport, target, views, render_pass);
-		}
-	};
-
-	// @Deprecated!!
-	struct depth_convert_pass : public overlay_pass
-	{
-		f32 src_scale_x;
-		f32 src_scale_y;
-
-		depth_convert_pass()
-		{
-			vs_src =
-				"#version 450\n"
-				"#extension GL_ARB_separate_shader_objects : enable\n"
-				"layout(std140, set=0, binding=0) uniform static_data{ vec4 regs[8]; };\n"
-				"layout(location=0) out vec2 tc0;\n"
-				"\n"
-				"void main()\n"
-				"{\n"
-				"	vec2 positions[] = {vec2(-1., -1.), vec2(1., -1.), vec2(-1., 1.), vec2(1., 1.)};\n"
-				"	vec2 coords[] = {vec2(0., 0.), vec2(1., 0.), vec2(0., 1.), vec2(1., 1.)};\n"
-				"	gl_Position = vec4(positions[gl_VertexIndex % 4], 0., 1.);\n"
-				"	tc0 = coords[gl_VertexIndex % 4] * regs[0].xy;\n"
-				"}\n";
-
-			fs_src =
-				"#version 420\n"
-				"#extension GL_ARB_separate_shader_objects : enable\n"
-				"#extension GL_ARB_shader_stencil_export : enable\n\n"
-				"layout(set=0, binding=1) uniform sampler2D fs0;\n"
-				"layout(location=0) in vec2 tc0;\n"
-				"\n"
-				"void main()\n"
-				"{\n"
-				"	vec4 rgba_in = texture(fs0, tc0);\n"
-				"	gl_FragDepth = rgba_in.w * 0.99609 + rgba_in.x * 0.00389 + rgba_in.y * 0.00002;\n"
-				"}\n";
-
-			renderpass_config.set_depth_mask(true);
-			renderpass_config.enable_depth_test(VK_COMPARE_OP_ALWAYS);
-		}
-
-		void update_uniforms(vk::command_buffer& /*cmd*/, vk::glsl::program* /*program*/) override
-		{
-			m_ubo_offset = static_cast<u32>(m_ubo.alloc<256>(128));
-			auto dst = static_cast<f32*>(m_ubo.map(m_ubo_offset, 128));
-			dst[0] = src_scale_x;
-			dst[1] = src_scale_y;
-			dst[2] = 0.f;
-			dst[3] = 0.f;
-			m_ubo.unmap();
-		}
-
-		void run(vk::command_buffer& cmd, const areai& src_area, const areai& dst_area, vk::image_view* src, vk::image* dst, VkRenderPass render_pass)
-		{
-			auto real_src = src->image();
-			verify(HERE), real_src;
-
-			src_scale_x = static_cast<f32>(src_area.x2) / real_src->width();
-			src_scale_y = static_cast<f32>(src_area.y2) / real_src->height();
-
-			overlay_pass::run(cmd, static_cast<areau>(dst_area), dst, src, render_pass);
 		}
 	};
 
@@ -681,15 +620,14 @@ namespace vk
 			return result;
 		}
 
-		void create(vk::command_buffer &cmd, vk::data_heap &upload_heap)
+		void init(vk::command_buffer &cmd, vk::data_heap &upload_heap)
 		{
-			auto& dev = cmd.get_command_pool().get_owner();
-			overlay_pass::create(dev);
-
 			rsx::overlays::resource_config configuration;
 			configuration.load_files();
 
+			auto& dev = cmd.get_command_pool().get_owner();
 			u64 storage_key = 1;
+
 			for (const auto &res : configuration.texture_raw_data)
 			{
 				upload_simple_texture(dev, cmd, upload_heap, storage_key++, res->w, res->h, 1, false, false, res->data, UINT32_MAX);
@@ -698,7 +636,7 @@ namespace vk
 			configuration.free_resources();
 		}
 
-		void destroy()
+		void destroy() override
 		{
 			temp_image_cache.clear();
 			temp_view_cache.clear();
@@ -1031,6 +969,68 @@ namespace vk
 		}
 	};
 
+	struct stencil_clear_pass : public overlay_pass
+	{
+		VkRect2D region = {};
+
+		stencil_clear_pass()
+		{
+			vs_src =
+				"#version 450\n"
+				"#extension GL_ARB_separate_shader_objects : enable\n"
+				"\n"
+				"void main()\n"
+				"{\n"
+				"	vec2 positions[] = {vec2(-1., -1.), vec2(1., -1.), vec2(-1., 1.), vec2(1., 1.)};\n"
+				"	gl_Position = vec4(positions[gl_VertexIndex % 4], 0., 1.);\n"
+				"}\n";
+
+			fs_src =
+				"#version 420\n"
+				"#extension GL_ARB_separate_shader_objects : enable\n"
+				"layout(location=0) out vec4 out_color;\n"
+				"\n"
+				"void main()\n"
+				"{\n"
+				"	out_color = vec4(0.);\n"
+				"}\n";
+		}
+
+		void set_up_viewport(vk::command_buffer& cmd, u32 x, u32 y, u32 w, u32 h) override
+		{
+			VkViewport vp{};
+			vp.x = static_cast<f32>(x);
+			vp.y = static_cast<f32>(y);
+			vp.width = static_cast<f32>(w);
+			vp.height = static_cast<f32>(h);
+			vp.minDepth = 0.f;
+			vp.maxDepth = 1.f;
+			vkCmdSetViewport(cmd, 0, 1, &vp);
+
+			vkCmdSetScissor(cmd, 0, 1, &region);
+		}
+
+		void run(vk::command_buffer& cmd, vk::render_target* target, VkRect2D rect, uint32_t stencil_clear, uint32_t stencil_write_mask, VkRenderPass render_pass)
+		{
+			region = rect;
+
+			// Stencil setup. Replace all pixels in the scissor region with stencil_clear with the correct write mask.
+			renderpass_config.enable_stencil_test(
+				VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE,  // Always replace
+				VK_COMPARE_OP_ALWAYS,                                                 // Always pass
+				0xFF,                                                                 // Full write-through
+				stencil_clear);                                                       // Write active bit
+
+			renderpass_config.set_stencil_mask(stencil_write_mask);
+			renderpass_config.set_depth_mask(false);
+
+			// Coverage sampling disabled, but actually report correct number of samples
+			renderpass_config.set_multisample_state(target->samples(), 0xFFFF, false, false, false);
+
+			overlay_pass::run(cmd, { 0, 0, target->width(), target->height() }, target, std::vector<vk::image_view*>{}, render_pass);
+		}
+	};
+
 	struct video_out_calibration_pass : public overlay_pass
 	{
 		union config_t
@@ -1157,4 +1157,24 @@ namespace vk
 			overlay_pass::run(cmd, viewport, target, views, render_pass);
 		}
 	};
+
+	// TODO: Replace with a proper manager
+	extern std::unordered_map<u32, std::unique_ptr<vk::overlay_pass>> g_overlay_passes;
+
+	template<class T>
+	T* get_overlay_pass()
+	{
+		u32 index = id_manager::typeinfo::get_index<T>();
+		auto& e = g_overlay_passes[index];
+
+		if (!e)
+		{
+			e = std::make_unique<T>();
+			e->create(*vk::get_current_renderer());
+		}
+
+		return static_cast<T*>(e.get());
+	}
+
+	void reset_overlay_passes();
 }

@@ -11,8 +11,6 @@ LOG_CHANNEL(sys_rsx);
 
 extern u64 get_timebased_time();
 
-static shared_mutex s_rsxmem_mtx;
-
 // Unknown error code returned by sys_rsx_context_attribute
 enum sys_rsx_error : s32
 {
@@ -74,7 +72,7 @@ void lv2_rsx_config::send_event(u64 data1, u64 event_flags, u64 data3) const
 		// Wait a bit before resending event
 		thread_ctrl::wait_for(100);
 
-		if (cpu && cpu->check_state())
+		if (Emu.IsStopped() || (cpu && cpu->check_state()))
 		{
 			error = 0;
 			break;
@@ -175,7 +173,7 @@ error_code sys_rsx_context_allocate(vm::ptr<u32> context_id, vm::ptr<u64> lpar_d
 
 	auto rsx_cfg = g_fxo->get<lv2_rsx_config>();
 
-	std::lock_guard lock(s_rsxmem_mtx);
+	std::lock_guard lock(rsx_cfg->mutex);
 
 	if (rsx_cfg->context_base)
 	{
@@ -198,17 +196,18 @@ error_code sys_rsx_context_allocate(vm::ptr<u32> context_id, vm::ptr<u64> lpar_d
 	auto &reports = vm::_ref<RsxReports>(vm::cast(*lpar_reports, HERE));
 	std::memset(&reports, 0, sizeof(RsxReports));
 
-	for (int i = 0; i < 64; ++i)
+	for (size_t i = 0; i < std::size(reports.notify); ++i)
 		reports.notify[i].timestamp = -1;
 
-	for (int i = 0; i < 256; ++i)
+	for (size_t i = 0; i < std::size(reports.semaphore); i += 4)
 	{
-		reports.semaphore[i].val = 0x1337C0D3;
-		reports.semaphore[i].pad = 0x1337BABE;
-		reports.semaphore[i].timestamp = -1; // technically different but should be fine
+		reports.semaphore[i + 0].val.raw() = 0x1337C0D3;
+		reports.semaphore[i + 1].val.raw() = 0x1337BABE;
+		reports.semaphore[i + 2].val.raw() = 0x1337BEEF;
+		reports.semaphore[i + 3].val.raw() = 0x1337F001;
 	}
 
-	for (int i = 0; i < 2048; ++i)
+	for (size_t i = 0; i < std::size(reports.report); ++i)
 	{
 		reports.report[i].val = 0;
 		reports.report[i].timestamp = -1;
@@ -260,6 +259,7 @@ error_code sys_rsx_context_allocate(vm::ptr<u32> context_id, vm::ptr<u64> lpar_d
 	render->current_display_buffer = 0;
 	render->label_addr = vm::cast(*lpar_reports, HERE);
 	render->device_addr = rsx_cfg->device_addr;
+	render->dma_address = rsx_cfg->dma_address;
 	render->local_mem_size = rsx_cfg->memory_size;
 	render->init(vm::cast(*lpar_dma_control, HERE));
 
@@ -277,9 +277,9 @@ error_code sys_rsx_context_free(u32 context_id)
 {
 	sys_rsx.todo("sys_rsx_context_free(context_id=0x%x)", context_id);
 
-	std::scoped_lock lock(s_rsxmem_mtx);
-
 	auto rsx_cfg = g_fxo->get<lv2_rsx_config>();
+
+	std::scoped_lock lock(rsx_cfg->mutex);
 
 	if (context_id != 0x55555555 || !rsx_cfg->context_base)
 	{
@@ -309,6 +309,15 @@ error_code sys_rsx_context_iomap(u32 context_id, u32 io, u32 ea, u32 size, u64 f
 		return CELL_EINVAL;
 	}
 
+	if (!render->is_fifo_idle())
+	{
+		sys_rsx.warning("sys_rsx_context_iomap(): RSX is not idle while mapping io");
+	}
+
+	// Wait until we have no active RSX locks and reserve iomap for use. Must do so before acquiring vm lock to avoid deadlocks
+	vm::temporary_unlock(*get_current_cpu_thread());
+	rsx::reservation_lock<true> rsx_lock(ea, size);
+
 	vm::reader_lock rlock;
 
 	for (u32 addr = ea, end = ea + size; addr < end; addr += 0x100000)
@@ -321,7 +330,8 @@ error_code sys_rsx_context_iomap(u32 context_id, u32 io, u32 ea, u32 size, u64 f
 
 	io >>= 20, ea >>= 20, size >>= 20;
 
-	std::scoped_lock lock(s_rsxmem_mtx);
+	render->pause();
+	std::scoped_lock lock(g_fxo->get<lv2_rsx_config>()->mutex);
 
 	for (u32 i = 0; i < size; i++)
 	{
@@ -334,6 +344,7 @@ error_code sys_rsx_context_iomap(u32 context_id, u32 io, u32 ea, u32 size, u64 f
 		table.io[ea + i].release((io + i) << 20);
 	}
 
+	render->unpause();
 	return CELL_OK;
 }
 
@@ -355,9 +366,14 @@ error_code sys_rsx_context_iounmap(u32 context_id, u32 io, u32 size)
 		return CELL_EINVAL;
 	}
 
+	if (!render->is_fifo_idle())
+	{
+		sys_rsx.warning("sys_rsx_context_iounmap(): RSX is not idle while unmapping io");
+	}
+
 	vm::reader_lock rlock;
 
-	std::scoped_lock lock(s_rsxmem_mtx);
+	std::scoped_lock lock(g_fxo->get<lv2_rsx_config>()->mutex);
 
 	for (const u32 end = (io >>= 20) + (size >>= 20); io < end;)
 	{
@@ -396,7 +412,8 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 
 	if (!rsx_cfg->context_base || context_id != 0x55555555)
 	{
-		return CELL_EINVAL;
+		sys_rsx.error("sys_rsx_context_attribute(): invalid context failure (context_id=0x%x)", context_id);
+		return CELL_OK; // Actually returns CELL_OK, cellGCmSys seem to be relying on this as well
 	}
 
 	auto &driverInfo = vm::_ref<RsxDriverInfo>(rsx_cfg->driver_info);
@@ -488,6 +505,10 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 			return SYS_RSX_CONTEXT_ATTRIBUTE_ERROR;
 		}
 
+		std::lock_guard lock(rsx_cfg->mutex);
+
+		// Note: no error checking is being done
+
 		const u32 width = (a4 >> 32) & 0xFFFFFFFF;
 		const u32 height = a4 & 0xFFFFFFFF;
 		const u32 pitch = (a5 >> 32) & 0xFFFFFFFF;
@@ -545,21 +566,77 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 
 		verify(HERE), a3 < std::size(render->tiles);
 
+		if (!render->is_fifo_idle())
+		{
+			sys_rsx.warning("sys_rsx_context_attribute(): RSX is not idle while setting tile");
+		}
+
 		auto& tile = render->tiles[a3];
 
-		// When tile is going to be unbinded, we can use it as a hint that the address will no longer be used as a surface and can be removed/invalidated
+		const u32 location = ((a4 >> 32) & 0x3) - 1;
+		const u32 offset = ((((a4 >> 32) & 0x7FFFFFFF) >> 16) * 0x10000);
+		const u32 size = ((((a4 & 0x7FFFFFFF) >> 16) + 1) * 0x10000) - offset;
+		const u32 pitch = (((a5 >> 32) & 0xFFFFFFFF) >> 8) * 0x100;
+		const u32 comp = ((a5 & 0xFFFFFFFF) >> 26) & 0xF;
+		const u32 base = (a5 & 0xFFFFFFFF) & 0x7FF;
+		const u32 bank = (((a4 >> 32) & 0xFFFFFFFF) >> 4) & 0xF;
+		const bool bound = ((a4 >> 32) & 0x3) != 0;
+
+		const auto range = utils::address_range::start_length(offset, size);
+
+		if (bound)
+		{
+			if (!size || !pitch)
+			{
+				return CELL_EINVAL;
+			}
+
+			u32 limit = UINT32_MAX;
+
+			switch (location)
+			{
+			case CELL_GCM_LOCATION_MAIN: limit = render->main_mem_size; break;
+			case CELL_GCM_LOCATION_LOCAL: limit = render->local_mem_size; break;
+			default: fmt::throw_exception("sys_rsx_context_attribute(): Unexpected location value (location=0x%x)" HERE, location);
+			}
+
+			if (!range.valid() || range.end >= limit)
+			{
+				return CELL_EINVAL;
+			}
+
+			// Hardcoded value in gcm
+			verify(HERE), !!(a5 & (1 << 30));
+		}
+
+		std::lock_guard lock(rsx_cfg->mutex);
+
+		// When tile is going to be unbound, we can use it as a hint that the address will no longer be used as a surface and can be removed/invalidated
 		// Todo: There may be more checks such as format/size/width can could be done
-		if (tile.binded && a5 == 0)
+		if (tile.bound && !bound)
 			render->notify_tile_unbound(static_cast<u32>(a3));
 
-		tile.location = ((a4 >> 32) & 0xF) - 1;
-		tile.offset = ((((a4 >> 32) & 0x7FFFFFFF) >> 16) * 0x10000);
-		tile.size = ((((a4 & 0x7FFFFFFF) >> 16) + 1) * 0x10000) - tile.offset;
-		tile.pitch = (((a5 >> 32) & 0xFFFFFFFF) >> 8) * 0x100;
-		tile.comp = ((a5 & 0xFFFFFFFF) >> 26) & 0xF;
-		tile.base = (a5 & 0xFFFFFFFF) & 0x7FF;
-		tile.bank = (((a4 >> 32) & 0xFFFFFFFF) >> 4) & 0xF;
-		tile.binded = a5 != 0;
+		if (location == CELL_GCM_LOCATION_MAIN && bound)
+		{
+			vm::reader_lock rlock;
+
+			for (u32 io = (offset >> 20), end = (range.end >> 20); io <= end; io++)
+			{
+				if (render->iomap_table.ea[io] == umax)
+				{
+					return CELL_EINVAL;
+				}
+			}
+		}
+
+		tile.location = location;
+		tile.offset = offset;
+		tile.size = size;
+		tile.pitch = pitch;
+		tile.comp = comp;
+		tile.base = base;
+		tile.bank = base;
+		tile.bound = bound;
 	}
 	break;
 
@@ -574,19 +651,53 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 
 		verify(HERE), a3 < std::size(render->zculls);
 
+		if (!render->is_fifo_idle())
+		{
+			sys_rsx.warning("sys_rsx_context_attribute(): RSX is not idle while setting zcull");
+		}
+
+		const u32 width = ((a4 & 0xFFFFFFFF) >> 22) << 6;
+		const u32 height = ((a4 & 0x0000FFFF) >> 6) << 6;
+		const u32 cullStart = (a5 >> 32) & ~0xFFF;
+		const u32 offset = (a5 & 0x0FFFFFFF);
+		const bool bound = (a6 & 0xFFFFFFFF) != 0;
+
+		if (bound)
+		{
+			const auto cull_range = utils::address_range::start_length(cullStart, width * height);
+
+			// cullStart is an offset inside ZCULL RAM which is 3MB long, check bounds
+			// width and height are not allowed to be zero (checked by range.valid())
+			if (!cull_range.valid() || cull_range.end >= 3u << 20 || offset >= render->local_mem_size)
+			{
+				return CELL_EINVAL;
+			}
+
+			if (a5 & 0xF0000000)
+			{
+				sys_rsx.warning("sys_rsx_context_attribute(): ZCULL offset greater than 256MB (offset=0x%x)", offset);
+			}
+
+			// Hardcoded values in gcm
+			verify(HERE), !!(a4 & (1ull << 32)), (a6 & 0xFFFFFFFF) == 0u + ((0x2000 << 0) | (0x20 << 16));
+		}
+
+		std::lock_guard lock(rsx_cfg->mutex);
+
 		auto &zcull = render->zculls[a3];
+
 		zcull.zFormat = ((a4 >> 32) >> 4) & 0xF;
 		zcull.aaFormat = ((a4 >> 32) >> 8) & 0xF;
-		zcull.width = ((a4 & 0xFFFFFFFF) >> 22) << 6;
-		zcull.height = (((a4 & 0xFFFFFFFF) >> 6) & 0xFF) << 6;
-		zcull.cullStart = (a5 >> 32);
-		zcull.offset = (a5 & 0xFFFFFFFF);
+		zcull.width = width;
+		zcull.height = height;
+		zcull.cullStart = cullStart;
+		zcull.offset = offset;
 		zcull.zcullDir = ((a6 >> 32) >> 1) & 0x1;
 		zcull.zcullFormat = ((a6 >> 32) >> 2) & 0x3FF;
 		zcull.sFunc = ((a6 >> 32) >> 12) & 0xF;
 		zcull.sRef = ((a6 >> 32) >> 16) & 0xFF;
 		zcull.sMask = ((a6 >> 32) >> 24) & 0xFF;
-		zcull.binded = (a6 & 0xFFFFFFFF) != 0;
+		zcull.bound = bound;
 	}
 	break;
 
@@ -625,8 +736,16 @@ error_code sys_rsx_context_attribute(u32 context_id, u32 package_id, u64 a3, u64
 
 		// todo: this is wrong and should be 'second' vblank handler and freq, but since currently everything is reported as being 59.94, this should be fine
 		vm::_ref<u32>(render->device_addr + 0x30) = 1;
+
+		const u64 current_time = rsxTimeStamp();
+
+		driverInfo.head[a3].lastSecondVTime = current_time;
+
+		// Note: not atomic
+		driverInfo.head[a3].lastVTimeLow = static_cast<u32>(current_time);
+		driverInfo.head[a3].lastVTimeHigh = static_cast<u32>(current_time >> 32);
+
 		driverInfo.head[a3].vBlankCount++;
-		driverInfo.head[a3].lastSecondVTime = rsxTimeStamp();
 
 		u64 event_flags = SYS_RSX_EVENT_VBLANK;
 

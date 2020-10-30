@@ -1,6 +1,8 @@
 ﻿cmake_minimum_required(VERSION 3.8.2)
 
-include(cotire)
+if(USE_PRECOMPILED_HEADERS AND NOT COMMAND target_precompile_headers)
+	include(cotire)
+endif()
 
 # Generate git-version.h at build time.
 include(${CMAKE_CURRENT_SOURCE_DIR}/git-version.cmake)
@@ -81,7 +83,7 @@ set_target_properties(rpcs3
 		AUTOUIC ON)
 
 target_link_libraries(rpcs3 rpcs3_emu rpcs3_ui)
-target_link_libraries(rpcs3 3rdparty::discord-rpc 3rdparty::qt5 3rdparty::hidapi 3rdparty::libusb)
+target_link_libraries(rpcs3 3rdparty::discord-rpc 3rdparty::qt5 3rdparty::hidapi 3rdparty::libusb 3rdparty::wolfssl)
 target_link_libraries(rpcs3 ${ADDITIONAL_LIBS})
 
 # Win resource file
@@ -105,17 +107,21 @@ if(UNIX)
 endif()
 
 if(WIN32)
-	target_link_libraries(rpcs3 ws2_32.lib Winmm.lib Psapi.lib gdi32.lib setupapi.lib)
+	target_link_libraries(rpcs3 ws2_32.lib Iphlpapi.lib Winmm.lib Psapi.lib gdi32.lib setupapi.lib)
 else()
 	target_link_libraries(rpcs3 ${CMAKE_DL_LIBS})
 endif()
 
-if(USE_COTIRE)
-	set_target_properties(rpcs3 PROPERTIES
-		COTIRE_CXX_PREFIX_HEADER_INIT "${RPCS3_SRC_DIR}/stdafx.h"
-		COTIRE_ADD_UNITY_BUILD OFF)
+if(USE_PRECOMPILED_HEADERS)
+	if(COMMAND target_precompile_headers)
+		target_precompile_headers(rpcs3 PRIVATE "${RPCS3_SRC_DIR}/stdafx.h")
+	else()
+		set_target_properties(rpcs3 PROPERTIES
+			COTIRE_CXX_PREFIX_HEADER_INIT "${RPCS3_SRC_DIR}/stdafx.h"
+			COTIRE_ADD_UNITY_BUILD OFF)
 
-	cotire(rpcs3)
+		cotire(rpcs3)
+	endif()
 endif()
 
 # Copy icons to executable directory

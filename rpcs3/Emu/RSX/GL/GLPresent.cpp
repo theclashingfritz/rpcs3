@@ -1,5 +1,6 @@
 ﻿#include "stdafx.h"
 #include "GLGSRender.h"
+#include "Emu/Cell/Modules/cellVideoOut.h"
 
 LOG_CHANNEL(screenshot);
 
@@ -9,7 +10,7 @@ gl::texture* GLGSRender::get_present_source(gl::present_surface_info* info, cons
 
 	// Check the surface store first
 	gl::command_context cmd = { gl_state };
-	const auto format_bpp = get_format_block_size_in_bytes(info->format);
+	const auto format_bpp = rsx::get_format_block_size_in_bytes(info->format);
 	const auto overlap_info = m_rtts.get_merged_texture_memory_region(cmd,
 		info->address, info->width, info->height, info->pitch, format_bpp, rsx::surface_access::read);
 
@@ -76,7 +77,21 @@ gl::texture* GLGSRender::get_present_source(gl::present_surface_info* info, cons
 		const auto range = utils::address_range::start_length(info->address, info->pitch * info->height);
 		m_gl_texture_cache.invalidate_range(cmd, range, rsx::invalidation_cause::read);
 
-		m_flip_tex_color->copy_from(vm::base(info->address), gl::texture::format::bgra, gl::texture::type::uint_8_8_8_8, unpack_settings);
+		gl::texture::format fmt;
+		switch (avconfig->format)
+		{
+		default:
+			rsx_log.error("Unhandled video output format 0x%x", avconfig->format);
+			[[fallthrough]];
+		case CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8R8G8B8:
+			fmt = gl::texture::format::bgra;
+			break;
+		case CELL_VIDEO_OUT_BUFFER_COLOR_FORMAT_X8B8G8R8:
+			fmt = gl::texture::format::rgba;
+			break;
+		}
+
+		m_flip_tex_color->copy_from(vm::base(info->address), fmt, gl::texture::type::uint_8_8_8_8, unpack_settings);
 		image = m_flip_tex_color.get();
 	}
 
@@ -205,19 +220,21 @@ void GLGSRender::flip(const rsx::display_flip_info_t& info)
 			pack_settings.apply();
 
 			if (gl::get_driver_caps().ARB_dsa_supported)
-				glGetTextureImage(image_to_flip, 0, GL_BGRA, GL_UNSIGNED_BYTE, buffer_height * buffer_width * 4, sshot_frame.data());
+				glGetTextureImage(image_to_flip, 0, GL_RGBA, GL_UNSIGNED_BYTE, buffer_height * buffer_width * 4, sshot_frame.data());
 			else
-				glGetTextureImageEXT(image_to_flip, GL_TEXTURE_2D, 0, GL_BGRA, GL_UNSIGNED_BYTE, sshot_frame.data());
+				glGetTextureImageEXT(image_to_flip, GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, sshot_frame.data());
 
 			if (GLenum err; (err = glGetError()) != GL_NO_ERROR)
 				screenshot.error("Failed to capture image: 0x%x", err);
 			else
-				m_frame->take_screenshot(std::move(sshot_frame), buffer_width, buffer_height);
+				m_frame->take_screenshot(std::move(sshot_frame), buffer_width, buffer_height, false);
 		}
 
-		areai screen_area = coordi({}, { static_cast<int>(buffer_width), static_cast<int>(buffer_height) });
+		const areai screen_area = coordi({}, { static_cast<int>(buffer_width), static_cast<int>(buffer_height) });
 
-		if (g_cfg.video.full_rgb_range_output && rsx::fcmp(avconfig->gamma, 1.f) && !avconfig->_3d)
+		const bool use_full_rgb_range_output = g_cfg.video.full_rgb_range_output.get();
+
+		if (use_full_rgb_range_output && rsx::fcmp(avconfig->gamma, 1.f) && !avconfig->_3d)
 		{
 			// Blit source image to the screen
 			m_flip_fbo.recreate();
@@ -230,7 +247,7 @@ void GLGSRender::flip(const rsx::display_flip_info_t& info)
 		else
 		{
 			const f32 gamma = avconfig->gamma;
-			const bool limited_range = !g_cfg.video.full_rgb_range_output;
+			const bool limited_range = !use_full_rgb_range_output;
 			const rsx::simple_array<GLuint> images{ image_to_flip, image_to_flip2 };
 
 			gl::screen.bind();
@@ -303,7 +320,8 @@ void GLGSRender::flip(const rsx::display_flip_info_t& info)
 	m_gl_texture_cache.on_frame_end();
 	m_vertex_cache->purge();
 
-	auto removed_textures = m_rtts.free_invalidated();
+	gl::command_context cmd{ gl_state };
+	auto removed_textures = m_rtts.free_invalidated(cmd);
 	m_framebuffer_cache.remove_if([&](auto& fbo)
 	{
 		if (fbo.unused_check_count() >= 2) return true; // Remove if stale

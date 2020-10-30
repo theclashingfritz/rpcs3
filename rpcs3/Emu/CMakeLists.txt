@@ -1,18 +1,23 @@
 ﻿add_library(rpcs3_emu
 	IdManager.cpp
+	localized_string.cpp
 	System.cpp
 	system_config.cpp
 	system_config_types.cpp
 	VFS.cpp
 	GDB.cpp
 	title.cpp
+	perf_meter.cpp
 )
+
+# prevent WolfSSL from warning about not having harden options
+add_compile_definitions(WC_NO_HARDEN)
 
 target_link_libraries(rpcs3_emu
 	PRIVATE
 		3rdparty::zlib 3rdparty::yaml-cpp
 	PUBLIC
-		3rdparty::libevdev)
+		3rdparty::libevdev 3rdparty::flatbuffers)
 
 
 find_package(Threads REQUIRED)
@@ -35,6 +40,7 @@ target_sources(rpcs3_emu PRIVATE
 	../util/yaml.cpp
 	../util/cereal.cpp
 	../../Utilities/bin_patch.cpp
+	../../Utilities/cheat_info.cpp
 	../../Utilities/cond.cpp
 	../../Utilities/Config.cpp
 	../../Utilities/dynamic_library.cpp
@@ -333,10 +339,6 @@ target_link_libraries(rpcs3_emu
 	PRIVATE
 		3rdparty::stblib 3rdparty::libpng)
 
-if(CMAKE_COMPILER_IS_GNUCXX)
-	target_link_libraries(rpcs3_emu PUBLIC -latomic)
-endif()
-
 
 # CPU
 target_sources(rpcs3_emu PRIVATE
@@ -361,7 +363,12 @@ target_sources(rpcs3_emu PRIVATE
 
 # Np
 target_sources(rpcs3_emu PRIVATE
+	NP/fb_helpers.cpp
 	NP/np_handler.cpp
+	NP/signaling_handler.cpp
+	NP/np_structs_extra.cpp
+	NP/rpcn_client.cpp
+	NP/rpcn_config.cpp
 )
 
 # Memory
@@ -436,6 +443,7 @@ if(TARGET 3rdparty_vulkan)
 		RSX/VK/VKMemAlloc.cpp
 		RSX/VK/VKPresent.cpp
 		RSX/VK/VKProgramPipeline.cpp
+		RSX/VK/VKQueryPool.cpp
 		RSX/VK/VKRenderPass.cpp
 		RSX/VK/VKResolveHelper.cpp
 		RSX/VK/VKResourceManager.cpp
@@ -451,19 +459,23 @@ target_link_libraries(rpcs3_emu
 		3rdparty::ffmpeg 3rdparty::cereal
 		3rdparty::opengl 3rdparty::stblib
 		3rdparty::vulkan 3rdparty::glew
-		3rdparty::libusb
+		3rdparty::libusb 3rdparty::wolfssl
 	PRIVATE
 		3rdparty::span 3rdparty::xxhash
 )
 
 
-if (USE_COTIRE)
-	# Setup cotire
-	option(UNITY_BUILD_EMU "Use unity build for rpcs3_emu target" OFF)
+if (USE_PRECOMPILED_HEADERS)
+	if (COMMAND target_precompile_headers)
+		target_precompile_headers(rpcs3_emu PRIVATE "${RPCS3_SRC_DIR}/stdafx.h")
+	else()
+		# Setup cotire
+		option(UNITY_BUILD_EMU "Use unity build for rpcs3_emu target" OFF)
 
-	set_target_properties(rpcs3_emu PROPERTIES
-		COTIRE_CXX_PREFIX_HEADER_INIT "${RPCS3_SRC_DIR}/stdafx.h"
-		COTIRE_ADD_UNITY_BUILD ${UNITY_BUILD_EMU})
+		set_target_properties(rpcs3_emu PROPERTIES
+			COTIRE_CXX_PREFIX_HEADER_INIT "${RPCS3_SRC_DIR}/stdafx.h"
+			COTIRE_ADD_UNITY_BUILD ${UNITY_BUILD_EMU})
 
-	cotire(rpcs3_emu)
+		cotire(rpcs3_emu)
+	endif()
 endif()

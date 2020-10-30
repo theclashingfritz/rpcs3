@@ -62,7 +62,7 @@ class main_window : public QMainWindow
 	QStringList m_vulkan_adapters;
 #endif
 
-	enum drop_type
+	enum class drop_type
 	{
 		drop_error,
 		drop_pkg,
@@ -109,6 +109,10 @@ private Q_SLOTS:
 	void SetIconSizeActions(int idx);
 	void ResizeIcons(int index);
 
+	void RemoveDiskCache();
+	void RemoveFirmwareCache();
+	void CreateFirmwareCache();
+
 protected:
 	void closeEvent(QCloseEvent *event) override;
 	void keyPressEvent(QKeyEvent *keyEvent) override;
@@ -127,13 +131,15 @@ private:
 	void EnableMenus(bool enabled);
 	void ShowTitleBars(bool show);
 
-	void InstallPackages(QStringList file_paths = QStringList(), bool show_confirm = true);
+	static bool InstallRapFile(const QString& path, const std::string& filename);
+
+	void InstallPackages(QStringList file_paths = QStringList());
 	void HandlePackageInstallation(QStringList file_paths = QStringList());
 
 	void InstallPup(QString filePath = "");
 	void HandlePupInstallation(QString file_path = "");
 
-	int IsValidFile(const QMimeData& md, QStringList* drop_paths = nullptr);
+	drop_type IsValidFile(const QMimeData& md, QStringList* drop_paths = nullptr);
 	void AddGamesFromDir(const QString& path);
 
 	QAction* CreateRecentAction(const q_string_pair& entry, const uint& sc_idx);
@@ -141,8 +147,6 @@ private:
 	void AddRecentAction(const q_string_pair& entry);
 
 	void UpdateLanguageActions(const QStringList& language_codes, const QString& language);
-
-	void RemoveDiskCache();
 
 	QString GetCurrentTitle();
 
@@ -165,4 +169,5 @@ private:
 	std::shared_ptr<persistent_settings> m_persistent_settings;
 
 	update_manager m_updater;
+	QAction* m_download_menu_action = nullptr;
 };

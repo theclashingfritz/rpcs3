@@ -611,16 +611,13 @@ void rsx_debugger::GetMemory()
 		if (const u32 ea = rsx::get_current_renderer()->iomap_table.get_addr(addr);
 			ea + 1)
 		{
-			u32 cmd = *vm::get_super_ptr<u32>(ea);
-			u32 count = (cmd >> 18) & 0x7ff;
+			const u32 cmd = *vm::get_super_ptr<u32>(ea);
+			const u32 count = cmd & RSX_METHOD_NON_METHOD_CMD_MASK ? 0 : (cmd >> 18) & 0x7ff;
+
 			m_list_commands->setItem(i, 1, new QTableWidgetItem(qstr(fmt::format("%08x", cmd))));
 			m_list_commands->setItem(i, 2, new QTableWidgetItem(DisAsmCommand(cmd, count, addr)));
 			m_list_commands->setItem(i, 3, new QTableWidgetItem(QString::number(count)));
-
-			if(!(cmd & RSX_METHOD_NON_METHOD_CMD_MASK))
-			{
-				addr += 4 * count;
-			}
+			addr += 4 * count;
 		}
 		else
 		{
@@ -809,6 +806,7 @@ const char* rsx_debugger::ParseGCMEnum(u32 value, u32 type)
 	case a + m * 14: \
 	case a + m * 15: \
 	index = (cmd - a) / m; \
+	[[fallthrough]]; \
 	case a \
 
 QString rsx_debugger::DisAsmCommand(u32 cmd, u32 count, u32 ioAddr)

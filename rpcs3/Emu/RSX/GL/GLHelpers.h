@@ -11,6 +11,7 @@
 #include "GLExecutionState.h"
 #include "../GCM.h"
 #include "../Common/TextureUtils.h"
+#include "../Common/GLSLTypes.h"
 
 #include "Emu/system_config.h"
 #include "Utilities/geometry.h"
@@ -27,50 +28,23 @@
 #define GL_FRAGMENT_CONSTANT_BUFFERS_BIND_SLOT 3
 #define GL_FRAGMENT_STATE_BIND_SLOT 4
 #define GL_FRAGMENT_TEXTURE_PARAMS_BIND_SLOT 5
-#define GL_COMPUTE_BUFFER_SLOT(index) (index + 6)
+#define GL_RASTERIZER_STATE_BIND_SLOT 6
+#define GL_INTERPRETER_VERTEX_BLOCK 7
+#define GL_INTERPRETER_FRAGMENT_BLOCK 8
+#define GL_COMPUTE_BUFFER_SLOT(index) (index + 9)
+
+// Noop keyword outside of Windows (used in log_debug)
+#if !defined(_WIN32) && !defined(APIENTRY)
+#define APIENTRY
+#endif
 
 inline static void _SelectTexture(int unit) { glActiveTexture(GL_TEXTURE0 + unit); }
 
+//using enum rsx::format_class;
+using namespace ::rsx::format_class_;
+
 namespace gl
 {
-#ifdef _DEBUG
-	struct __glcheck_impl_t
-	{
-		const char* file;
-		const char* function;
-		int line;
-
-		constexpr __glcheck_impl_t(const char* file, const char* function, int line)
-			: file(file)
-			, function(function)
-			, line(line)
-		{
-		}
-
-		~__glcheck_impl_t() noexcept(false)
-		{
-			if (GLenum err = glGetError())
-			{
-				std::string error;
-				switch (err)
-				{
-				case GL_INVALID_OPERATION:      error = "invalid operation";      break;
-				case GL_INVALID_ENUM:           error = "invalid enum";           break;
-				case GL_INVALID_VALUE:          error = "invalid value";          break;
-				case GL_OUT_OF_MEMORY:          error = "out of memory";          break;
-				case GL_INVALID_FRAMEBUFFER_OPERATION:  error = "invalid framebuffer operation";  break;
-				default: error = "unknown error"; break;
-				}
-
-				fmt::throw_exception("OpenGL error: %s\n(in file %s:%d, function %s)", error, file, line, function);
-			}
-		}
-	};
-#define __glcheck ::gl::__glcheck_impl_t{ __FILE__, __FUNCTION__, __LINE__ },
-#else
-#define __glcheck
-#endif
-
 	//Function call wrapped in ARB_DSA vs EXT_DSA compat check
 #define DSA_CALL(func, texture_name, target, ...)\
 	if (::gl::get_driver_caps().ARB_dsa_supported)\
@@ -78,11 +52,7 @@ namespace gl
 	else\
 		gl##func##EXT(texture_name, target, __VA_ARGS__);
 
-	class capabilities;
-	class blitter;
-
 	void enable_debugging();
-	capabilities& get_driver_caps();
 	bool is_primitive_native(rsx::primitive_type in);
 	GLenum draw_mode(rsx::primitive_type in);
 
@@ -101,182 +71,6 @@ namespace gl
 		const char* what() const noexcept override
 		{
 			return m_what.c_str();
-		}
-	};
-
-	class capabilities
-	{
-	public:
-		bool EXT_dsa_supported = false;
-		bool ARB_dsa_supported = false;
-		bool ARB_buffer_storage_supported = false;
-		bool ARB_texture_buffer_supported = false;
-		bool ARB_shader_draw_parameters_supported = false;
-		bool ARB_depth_buffer_float_supported = false;
-		bool ARB_texture_barrier_supported = false;
-		bool NV_texture_barrier_supported = false;
-		bool NV_gpu_shader5_supported = false;
-		bool AMD_gpu_shader_half_float_supported = false;
-		bool ARB_compute_shader_supported = false;
-		bool initialized = false;
-		bool vendor_INTEL = false;  // has broken GLSL compiler
-		bool vendor_AMD = false;    // has broken ARB_multidraw
-		bool vendor_NVIDIA = false; // has NaN poisoning issues
-		bool vendor_MESA = false;   // requires CLIENT_STORAGE bit set for streaming buffers
-
-		bool check(const std::string& ext_name, const char* test)
-		{
-			if (ext_name == test)
-			{
-				rsx_log.notice("Extension %s is supported", ext_name);
-				return true;
-			}
-
-			return false;
-		}
-
-		void initialize()
-		{
-			int find_count = 11;
-			int ext_count = 0;
-			glGetIntegerv(GL_NUM_EXTENSIONS, &ext_count);
-
-			for (int i = 0; i < ext_count; i++)
-			{
-				if (!find_count) break;
-
-				const std::string ext_name = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, i));
-
-				if (check(ext_name, "GL_ARB_shader_draw_parameters"))
-				{
-					ARB_shader_draw_parameters_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_EXT_direct_state_access"))
-				{
-					EXT_dsa_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_ARB_direct_state_access"))
-				{
-					ARB_dsa_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_ARB_buffer_storage"))
-				{
-					ARB_buffer_storage_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_ARB_texture_buffer_object"))
-				{
-					ARB_texture_buffer_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_ARB_depth_buffer_float"))
-				{
-					ARB_depth_buffer_float_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_ARB_texture_barrier"))
-				{
-					ARB_texture_barrier_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_NV_texture_barrier"))
-				{
-					NV_texture_barrier_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_NV_gpu_shader5"))
-				{
-					NV_gpu_shader5_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_AMD_gpu_shader_half_float"))
-				{
-					AMD_gpu_shader_half_float_supported = true;
-					find_count--;
-					continue;
-				}
-
-				if (check(ext_name, "GL_ARB_compute_shader"))
-				{
-					ARB_compute_shader_supported = true;
-					find_count--;
-					continue;
-				}
-			}
-
-			// Workaround for intel drivers which have terrible capability reporting
-			std::string vendor_string = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
-			if (!vendor_string.empty())
-			{
-				std::transform(vendor_string.begin(), vendor_string.end(), vendor_string.begin(), ::tolower);
-			}
-			else
-			{
-				rsx_log.error("Failed to get vendor string from driver. Are we missing a context?");
-				vendor_string = "intel"; //lowest acceptable value
-			}
-
-			if (vendor_string.find("intel") != umax)
-			{
-				int version_major = 0;
-				int version_minor = 0;
-
-				glGetIntegerv(GL_MAJOR_VERSION, &version_major);
-				glGetIntegerv(GL_MINOR_VERSION, &version_minor);
-
-				vendor_INTEL = true;
-
-				//Texture buffers moved into core at GL 3.3
-				if (version_major > 3 || (version_major == 3 && version_minor >= 3))
-					ARB_texture_buffer_supported = true;
-
-				//Check for expected library entry-points for some required functions
-				if (!ARB_buffer_storage_supported && glBufferStorage && glMapBufferRange)
-					ARB_buffer_storage_supported = true;
-
-				if (!ARB_dsa_supported && glGetTextureImage && glTextureBufferRange)
-					ARB_dsa_supported = true;
-
-				if (!EXT_dsa_supported && glGetTextureImageEXT && glTextureBufferRangeEXT)
-					EXT_dsa_supported = true;
-			}
-			else if (vendor_string.find("nvidia") != umax)
-			{
-				vendor_NVIDIA = true;
-			}
-			else if (vendor_string.find("x.org") != umax)
-			{
-				vendor_MESA = true;
-			}
-#ifdef _WIN32
-			else if (vendor_string.find("amd") != umax || vendor_string.find("ati") != umax)
-			{
-				vendor_AMD = true;
-			}
-#endif
-
-			initialized = true;
 		}
 	};
 
@@ -366,6 +160,7 @@ namespace gl
 						{
 						default:
 							rsx_log.error("gl::fence sync returned unknown error 0x%X", err);
+							[[fallthrough]];
 						case GL_ALREADY_SIGNALED:
 						case GL_CONDITION_SATISFIED:
 							done = true;
@@ -758,7 +553,6 @@ namespace gl
 				m_target = static_cast<GLenum>(target_);
 			}
 
-
 			~save_binding_state()
 			{
 				glBindBuffer(m_target, m_last_binding);
@@ -890,8 +684,11 @@ namespace gl
 
 		void remove()
 		{
-			glDeleteBuffers(1, &m_id);
-			m_id = 0;
+			if (m_id != GL_NONE)
+			{
+				glDeleteBuffers(1, &m_id);
+				m_id = GL_NONE;
+			}
 		}
 
 		GLsizeiptr size() const
@@ -911,7 +708,7 @@ namespace gl
 
 		bool created() const
 		{
-			return m_id != 0;
+			return m_id != GL_NONE;
 		}
 
 		explicit operator bool() const
@@ -951,6 +748,18 @@ namespace gl
 		void bind_range(target target_, u32 index, u32 offset, u32 size) const
 		{
 			glBindBufferRange(static_cast<GLenum>(target_), index, id(), offset, size);
+		}
+
+		void copy_to(buffer* other, u64 src_offset, u64 dst_offset, u64 size)
+		{
+			if (get_driver_caps().ARB_dsa_supported)
+			{
+				glCopyNamedBufferSubData(this->id(), other->id(), src_offset, dst_offset, size);
+			}
+			else
+			{
+				glNamedCopyBufferSubDataEXT(this->id(), other->id(), src_offset, dst_offset, size);
+			}
 		}
 	};
 
@@ -1031,8 +840,12 @@ namespace gl
 				m_size = 0;
 			}
 
-			glDeleteBuffers(1, &m_id);
-			m_id = 0;
+
+			if (m_id != GL_NONE)
+			{
+				glDeleteBuffers(1, &m_id);
+				m_id = GL_NONE;
+			}
 		}
 
 		virtual void reserve_storage_on_heap(u32 /*alloc_size*/) {}
@@ -1300,8 +1113,11 @@ namespace gl
 
 		void remove() noexcept
 		{
-			glDeleteVertexArrays(1, &m_id);
-			m_id = GL_NONE;
+			if (m_id != GL_NONE)
+			{
+				glDeleteVertexArrays(1, &m_id);
+				m_id = GL_NONE;
+			}
 		}
 
 		uint id() const noexcept
@@ -1471,19 +1287,9 @@ namespace gl
 
 		enum class internal_format
 		{
-			r = GL_RED,
-			rg = GL_RG,
-			rgb = GL_RGB,
-			rgba = GL_RGBA,
-
-			bgr = GL_BGR,
-			bgra = GL_BGRA,
-
-			stencil = GL_STENCIL_INDEX,
 			stencil8 = GL_STENCIL_INDEX8,
-			depth = GL_DEPTH_COMPONENT,
 			depth16 = GL_DEPTH_COMPONENT16,
-			depth_stencil = GL_DEPTH_STENCIL,
+			depth32f = GL_DEPTH_COMPONENT32F,
 			depth24_stencil8 = GL_DEPTH24_STENCIL8,
 			depth32f_stencil8 = GL_DEPTH32F_STENCIL8,
 
@@ -1524,18 +1330,6 @@ namespace gl
 			ref_to_texture = GL_COMPARE_REF_TO_TEXTURE
 		};
 
-		enum class compare_func
-		{
-			never = GL_NEVER,
-			less = GL_LESS,
-			equal = GL_EQUAL,
-			lequal = GL_LEQUAL,
-			greater = GL_GREATER,
-			notequal = GL_NOTEQUAL,
-			gequal = GL_GEQUAL,
-			always = GL_ALWAYS
-		};
-
 		enum class target
 		{
 			texture1D = GL_TEXTURE_1D,
@@ -1545,27 +1339,8 @@ namespace gl
 			textureBuffer = GL_TEXTURE_BUFFER
 		};
 
-		enum class channel_type
-		{
-			none = GL_NONE,
-			signed_normalized = GL_SIGNED_NORMALIZED,
-			unsigned_normalized = GL_UNSIGNED_NORMALIZED,
-			float_ = GL_FLOAT,
-			int_ = GL_INT,
-			uint_ = GL_UNSIGNED_INT
-		};
-
-		enum class channel_name
-		{
-			red = GL_TEXTURE_RED_TYPE,
-			green = GL_TEXTURE_GREEN_TYPE,
-			blue = GL_TEXTURE_BLUE_TYPE,
-			alpha = GL_TEXTURE_ALPHA_TYPE,
-			depth = GL_TEXTURE_DEPTH_TYPE
-		};
-
 	protected:
-		GLuint m_id = 0;
+		GLuint m_id = GL_NONE;
 		GLuint m_width = 0;
 		GLuint m_height = 0;
 		GLuint m_depth = 0;
@@ -1577,6 +1352,8 @@ namespace gl
 		target m_target = target::texture2D;
 		internal_format m_internal_format = internal_format::rgba8;
 		std::array<GLenum, 4> m_component_layout;
+
+		rsx::format_class m_format_class = RSX_FORMAT_CLASS_UNDEFINED;
 
 	private:
 		class save_binding_state
@@ -1620,7 +1397,8 @@ namespace gl
 		texture(const texture&) = delete;
 		texture(texture&& texture_) = delete;
 
-		texture(GLenum target, GLuint width, GLuint height, GLuint depth, GLuint mipmaps, GLenum sized_format)
+		texture(GLenum target, GLuint width, GLuint height, GLuint depth, GLuint mipmaps, GLenum sized_format,
+				rsx::format_class format_class = rsx::RSX_FORMAT_CLASS_UNDEFINED)
 		{
 			save_binding_state save(target);
 			glGenTextures(1, &m_id);
@@ -1671,7 +1449,12 @@ namespace gl
 					m_aspect_flags = image_aspect::depth;
 					break;
 				}
-				case GL_DEPTH_COMPONENT32: // Unimplemented decode
+				case GL_DEPTH_COMPONENT32F:
+				{
+					m_pitch = width * 4;
+					m_aspect_flags = image_aspect::depth;
+					break;
+				}
 				case GL_DEPTH24_STENCIL8:
 				case GL_DEPTH32F_STENCIL8:
 				{
@@ -1711,16 +1494,33 @@ namespace gl
 				{
 					fmt::throw_exception("Unhandled GL format 0x%X" HERE, sized_format);
 				}
+
+				if (format_class == RSX_FORMAT_CLASS_UNDEFINED)
+				{
+					if (m_aspect_flags != image_aspect::color)
+					{
+						rsx_log.error("Undefined format class for depth texture is not allowed");
+					}
+					else
+					{
+						format_class = RSX_FORMAT_CLASS_COLOR;
+					}
+				}
 			}
 
 			m_target = static_cast<texture::target>(target);
 			m_internal_format = static_cast<internal_format>(sized_format);
 			m_component_layout = { GL_ALPHA, GL_RED, GL_GREEN, GL_BLUE };
+			m_format_class = format_class;
 		}
 
 		virtual ~texture()
 		{
-			glDeleteTextures(1, &m_id);
+			if (m_id != GL_NONE)
+			{
+				glDeleteTextures(1, &m_id);
+				m_id = GL_NONE;
+			}
 		}
 
 		void set_native_component_layout(const std::array<GLenum, 4>& layout)
@@ -1757,7 +1557,7 @@ namespace gl
 
 		explicit operator bool() const noexcept
 		{
-			return (m_id != 0);
+			return (m_id != GL_NONE);
 		}
 
 		GLuint width() const
@@ -1795,6 +1595,11 @@ namespace gl
 			return m_aspect_flags;
 		}
 
+		rsx::format_class format_class() const
+		{
+			return m_format_class;
+		}
+
 		sizeu size2D() const
 		{
 			return{ m_width, m_height };
@@ -1816,7 +1621,7 @@ namespace gl
 			return m_component_layout;
 		}
 
-		void copy_from(const void* src, texture::format format, texture::type type, const coord3u region, const pixel_unpack_settings& pixel_settings)
+		void copy_from(const void* src, texture::format format, texture::type type, int level, const coord3u region, const pixel_unpack_settings& pixel_settings)
 		{
 			pixel_settings.apply();
 
@@ -1824,25 +1629,25 @@ namespace gl
 			{
 			case GL_TEXTURE_1D:
 			{
-				DSA_CALL(TextureSubImage1D, m_id, GL_TEXTURE_1D, 0, region.x, region.width, static_cast<GLenum>(format), static_cast<GLenum>(type), src);
+				DSA_CALL(TextureSubImage1D, m_id, GL_TEXTURE_1D, level, region.x, region.width, static_cast<GLenum>(format), static_cast<GLenum>(type), src);
 				break;
 			}
 			case GL_TEXTURE_2D:
 			{
-				DSA_CALL(TextureSubImage2D, m_id, GL_TEXTURE_2D, 0, region.x, region.y, region.width, region.height, static_cast<GLenum>(format), static_cast<GLenum>(type), src);
+				DSA_CALL(TextureSubImage2D, m_id, GL_TEXTURE_2D, level, region.x, region.y, region.width, region.height, static_cast<GLenum>(format), static_cast<GLenum>(type), src);
 				break;
 			}
 			case GL_TEXTURE_3D:
 			case GL_TEXTURE_2D_ARRAY:
 			{
-				DSA_CALL(TextureSubImage3D, m_id, target_, 0, region.x, region.y, region.z, region.width, region.height, region.depth, static_cast<GLenum>(format), static_cast<GLenum>(type), src);
+				DSA_CALL(TextureSubImage3D, m_id, target_, level, region.x, region.y, region.z, region.width, region.height, region.depth, static_cast<GLenum>(format), static_cast<GLenum>(type), src);
 				break;
 			}
 			case GL_TEXTURE_CUBE_MAP:
 			{
 				if (get_driver_caps().ARB_dsa_supported)
 				{
-					glTextureSubImage3D(m_id, 0, region.x, region.y, region.z, region.width, region.height, region.depth, static_cast<GLenum>(format), static_cast<GLenum>(type), src);
+					glTextureSubImage3D(m_id, level, region.x, region.y, region.z, region.width, region.height, region.depth, static_cast<GLenum>(format), static_cast<GLenum>(type), src);
 				}
 				else
 				{
@@ -1851,7 +1656,7 @@ namespace gl
 					const auto end = std::min(6u, region.z + region.depth);
 					for (unsigned face = region.z; face < end; ++face)
 					{
-						glTextureSubImage2DEXT(m_id, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, region.x, region.y, region.width, region.height, static_cast<GLenum>(format), static_cast<GLenum>(type), ptr);
+						glTextureSubImage2DEXT(m_id, GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, level, region.x, region.y, region.width, region.height, static_cast<GLenum>(format), static_cast<GLenum>(type), ptr);
 						ptr += (region.width * region.height * 4); //TODO
 					}
 				}
@@ -1863,7 +1668,7 @@ namespace gl
 		void copy_from(const void* src, texture::format format, texture::type type, const pixel_unpack_settings& pixel_settings)
 		{
 			const coord3u region = { {}, size3D() };
-			copy_from(src, format, type, region, pixel_settings);
+			copy_from(src, format, type, 0, region, pixel_settings);
 		}
 
 		void copy_from(buffer &buf, u32 gl_format_type, u32 offset, u32 length)
@@ -1879,7 +1684,7 @@ namespace gl
 			copy_from(*view.value(), view.format(), view.offset(), view.range());
 		}
 
-		void copy_to(void* dst, texture::format format, texture::type type, const coord3u& region, const pixel_pack_settings& pixel_settings) const
+		void copy_to(void* dst, texture::format format, texture::type type, int level, const coord3u& region, const pixel_pack_settings& pixel_settings) const
 		{
 			pixel_settings.apply();
 			const auto& caps = get_driver_caps();
@@ -1888,13 +1693,13 @@ namespace gl
 				region.width == m_width && region.height == m_height && region.depth == m_depth)
 			{
 				if (caps.ARB_dsa_supported)
-					glGetTextureImage(m_id, 0, static_cast<GLenum>(format), static_cast<GLenum>(type), INT32_MAX, dst);
+					glGetTextureImage(m_id, level, static_cast<GLenum>(format), static_cast<GLenum>(type), INT32_MAX, dst);
 				else
-					glGetTextureImageEXT(m_id, static_cast<GLenum>(m_target), 0, static_cast<GLenum>(format), static_cast<GLenum>(type), dst);
+					glGetTextureImageEXT(m_id, static_cast<GLenum>(m_target), level, static_cast<GLenum>(format), static_cast<GLenum>(type), dst);
 			}
 			else if (caps.ARB_dsa_supported)
 			{
-				glGetTextureSubImage(m_id, 0, region.x, region.y, region.z, region.width, region.height, region.depth,
+				glGetTextureSubImage(m_id, level, region.x, region.y, region.z, region.width, region.height, region.depth,
 					static_cast<GLenum>(format), static_cast<GLenum>(type), INT32_MAX, dst);
 			}
 			else
@@ -1902,24 +1707,24 @@ namespace gl
 				// Worst case scenario. For some reason, EXT_dsa does not have glGetTextureSubImage
 				const auto target_ = static_cast<GLenum>(m_target);
 				texture tmp{ target_, region.width, region.height, region.depth, 1, static_cast<GLenum>(m_internal_format) };
-				glCopyImageSubData(m_id, target_, 0, region.x, region.y, region.z, tmp.id(), target_, 0, 0, 0, 0,
+				glCopyImageSubData(m_id, target_, level, region.x, region.y, region.z, tmp.id(), target_, 0, 0, 0, 0,
 					region.width, region.height, region.depth);
 
 				const coord3u region2 = { {0, 0, 0}, region.size };
-				tmp.copy_to(dst, format, type, region2, pixel_settings);
+				tmp.copy_to(dst, format, type, 0, region2, pixel_settings);
 			}
 		}
 
 		void copy_to(void* dst, texture::format format, texture::type type, const pixel_pack_settings& pixel_settings) const
 		{
 			const coord3u region = { {}, size3D() };
-			copy_to(dst, format, type, region, pixel_settings);
+			copy_to(dst, format, type, 0, region, pixel_settings);
 		}
 	};
 
 	class texture_view
 	{
-		GLuint m_id = 0;
+		GLuint m_id = GL_NONE;
 		GLenum m_target = 0;
 		GLenum m_format = 0;
 		GLenum m_aspect_flags = 0;
@@ -1997,7 +1802,11 @@ namespace gl
 
 		~texture_view()
 		{
-			glDeleteTextures(1, &m_id);
+			if (m_id != GL_NONE)
+			{
+				glDeleteTextures(1, &m_id);
+				m_id = GL_NONE;
+			}
 		}
 
 		GLuint id() const
@@ -2091,7 +1900,7 @@ public:
 
 	class rbo
 	{
-		GLuint m_id = 0;
+		GLuint m_id = GL_NONE;
 
 	public:
 		rbo() = default;
@@ -2164,8 +1973,11 @@ public:
 
 		void remove()
 		{
-			glDeleteRenderbuffers(1, &m_id);
-			m_id = 0;
+			if (m_id != GL_NONE)
+			{
+				glDeleteRenderbuffers(1, &m_id);
+				m_id = GL_NONE;
+			}
 		}
 
 		uint id() const
@@ -2180,7 +1992,7 @@ public:
 
 		bool created() const
 		{
-			return m_id != 0;
+			return m_id != GL_NONE;
 		}
 
 		explicit operator bool() const
@@ -2281,7 +2093,7 @@ public:
 					return found->second;
 				}
 
-				return GL_NONE;
+				return 0;
 			}
 
 			void operator = (const rbo& rhs)
@@ -2382,9 +2194,9 @@ public:
 		void copy_to(void* pixels, coordi coord, gl::texture::format format_, gl::texture::type type_, class pixel_pack_settings pixel_settings = pixel_pack_settings()) const;
 		void copy_to(const buffer& buf, coordi coord, gl::texture::format format_, gl::texture::type type_, class pixel_pack_settings pixel_settings = pixel_pack_settings()) const;
 
-		static fbo get_binded_draw_buffer();
-		static fbo get_binded_read_buffer();
-		static fbo get_binded_buffer();
+		static fbo get_bound_draw_buffer();
+		static fbo get_bound_read_buffer();
+		static fbo get_bound_buffer();
 
 		GLuint id() const;
 		void set_id(GLuint id);
@@ -2407,21 +2219,11 @@ public:
 	{
 		class shader
 		{
-		public:
-			enum class type
-			{
-				fragment = GL_FRAGMENT_SHADER,
-				vertex = GL_VERTEX_SHADER,
-				compute = GL_COMPUTE_SHADER
-			};
-
-		private:
-
+			std::string source;
+			::glsl::program_domain type;
 			GLuint m_id = GL_NONE;
-			type shader_type = type::vertex;
 
 		public:
-
 			shader() = default;
 
 			shader(GLuint id)
@@ -2429,15 +2231,9 @@ public:
 				set_id(id);
 			}
 
-			shader(type type_)
+			shader(::glsl::program_domain type_, const std::string& src)
 			{
-				create(type_);
-			}
-
-			shader(type type_, const std::string& src)
-			{
-				create(type_);
-				source(src);
+				create(type_, src);
 			}
 
 			~shader()
@@ -2446,36 +2242,46 @@ public:
 					remove();
 			}
 
-			void recreate(type type_)
+			void create(::glsl::program_domain type_, const std::string& src)
 			{
-				if (created())
-					remove();
-
-				create(type_);
+				type = type_;
+				source = src;
 			}
 
-			void create(type type_)
+			shader& compile()
 			{
-				m_id = glCreateShader(static_cast<GLenum>(type_));
-				shader_type = type_;
-			}
+				GLenum shader_type;
+				switch (type)
+				{
+				case ::glsl::program_domain::glsl_vertex_program:
+					shader_type = GL_VERTEX_SHADER;
+					break;
+				case ::glsl::program_domain::glsl_fragment_program:
+					shader_type = GL_FRAGMENT_SHADER;
+					break;
+				case ::glsl::program_domain::glsl_compute_program:
+					shader_type = GL_COMPUTE_SHADER;
+					break;
+				default:
+					rsx_log.fatal("gl::glsl::shader::compile(): Unhandled shader type");
+				}
 
-			void source(const std::string& src) const
-			{
-				const char* str = src.c_str();
-				const GLint length = ::narrow<GLint>(src.length());
+				m_id = glCreateShader(shader_type);
+				const char* str = source.c_str();
+				const GLint length = ::narrow<GLint>(source.length());
+
 				if (g_cfg.video.log_programs)
 				{
 					std::string base_name;
-					switch (shader_type)
+					switch (type)
 					{
-					case type::vertex:
+					case ::glsl::program_domain::glsl_vertex_program:
 						base_name = "shaderlog/VertexProgram";
 						break;
-					case type::fragment:
+					case ::glsl::program_domain::glsl_fragment_program:
 						base_name = "shaderlog/FragmentProgram";
 						break;
-					case type::compute:
+					case ::glsl::program_domain::glsl_compute_program:
 						base_name = "shaderlog/ComputeProgram";
 						break;
 					}
@@ -2484,10 +2290,6 @@ public:
 				}
 
 				glShaderSource(m_id, 1, &str, &length);
-			}
-
-			shader& compile()
-			{
 				glCompileShader(m_id);
 
 				GLint status = GL_FALSE;
@@ -2514,13 +2316,21 @@ public:
 
 			void remove()
 			{
-				glDeleteShader(m_id);
-				m_id = 0;
+				if (m_id != GL_NONE)
+				{
+					glDeleteShader(m_id);
+					m_id = GL_NONE;
+				}
 			}
 
 			uint id() const
 			{
 				return m_id;
+			}
+
+			const std::string& get_source() const
+			{
+				return source;
 			}
 
 			void set_id(uint id)
@@ -2530,7 +2340,7 @@ public:
 
 			bool created() const
 			{
-				return m_id != 0;
+				return m_id != GL_NONE;
 			}
 
 			explicit operator bool() const
@@ -2541,7 +2351,7 @@ public:
 
 		class program
 		{
-			GLuint m_id = 0;
+			GLuint m_id = GL_NONE;
 			fence m_fence;
 
 		public:
@@ -2575,6 +2385,7 @@ public:
 				void operator = (const color4f& rhs) const { glProgramUniform4f(m_program.id(), location(), rhs.r, rhs.g, rhs.b, rhs.a); }
 				void operator = (const areaf& rhs) const { glProgramUniform4f(m_program.id(), location(), rhs.x1, rhs.y1, rhs.x2, rhs.y2); }
 				void operator = (const areai& rhs) const { glProgramUniform4i(m_program.id(), location(), rhs.x1, rhs.y1, rhs.x2, rhs.y2); }
+				void operator = (const std::vector<int>& rhs) const { glProgramUniform1iv(m_program.id(), location(), ::size32(rhs), rhs.data()); }
 			};
 
 			class uniforms_t
@@ -2688,8 +2499,11 @@ public:
 
 			void remove()
 			{
-				glDeleteProgram(m_id);
-				m_id = 0;
+				if (m_id != GL_NONE)
+				{
+					glDeleteProgram(m_id);
+					m_id = GL_NONE;
+				}
 				uniforms.clear();
 			}
 
@@ -2705,7 +2519,7 @@ public:
 				glUseProgram(m_id);
 			}
 
-			void link()
+			void link(std::function<void(program*)> init_func = {})
 			{
 				glLinkProgram(m_id);
 
@@ -2729,6 +2543,11 @@ public:
 				}
 				else
 				{
+					if (init_func)
+					{
+						init_func(this);
+					}
+
 					m_fence.create();
 
 					if (!is_primary_context_thread())
@@ -2762,7 +2581,7 @@ public:
 				}
 			}
 
-			uint id() const
+			GLuint id() const
 			{
 				return m_id;
 			}
@@ -2775,7 +2594,7 @@ public:
 
 			bool created() const
 			{
-				return m_id != 0;
+				return m_id != GL_NONE;
 			}
 
 			void sync()

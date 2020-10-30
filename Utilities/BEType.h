@@ -1,8 +1,10 @@
-#pragma once
+﻿#ifndef BETYPE_H_GUARD
+#define BETYPE_H_GUARD
 
 #include "types.h"
 #include "util/endian.hpp"
 #include <cstring>
+#include <cmath>
 
 #if __has_include(<bit>)
 #include <bit>
@@ -13,7 +15,8 @@
 // 128-bit vector type and also se_storage<> storage type
 union alignas(16) v128
 {
-	char _bytes[16];
+	uchar _bytes[16];
+	char _chars[16];
 
 	template <typename T, std::size_t N, std::size_t M>
 	struct masked_array_t // array type accessed as (index ^ M)
@@ -223,6 +226,20 @@ union alignas(16) v128
 		return ret;
 	}
 
+	// Unaligned load with optional index offset
+	static v128 loadu(const void* ptr, std::size_t index = 0)
+	{
+		v128 ret;
+		std::memcpy(&ret, static_cast<const u8*>(ptr) + index * sizeof(v128), sizeof(v128));
+		return ret;
+	}
+
+	// Unaligned store with optional index offset
+	static void storeu(v128 value, void* ptr, std::size_t index = 0)
+	{
+		std::memcpy(static_cast<u8*>(ptr) + index * sizeof(v128), &value, sizeof(v128));
+	}
+
 	static inline v128 add8(const v128& left, const v128& right)
 	{
 		return fromV(_mm_add_epi8(left.vi, right.vi));
@@ -298,14 +315,54 @@ union alignas(16) v128
 		return fromV(_mm_cmpeq_epi32(left.vi, right.vi));
 	}
 
+	static inline v128 eq32f(const v128& left, const v128& right)
+	{
+		return fromF(_mm_cmpeq_ps(left.vf, right.vf));
+	}
+
+	static inline v128 eq64f(const v128& left, const v128& right)
+	{
+		return fromD(_mm_cmpeq_pd(left.vd, right.vd));
+	}
+
+	static inline bool use_fma = false;
+
+	static inline v128 fma32f(v128 a, const v128& b, const v128& c)
+	{
+#ifndef __FMA__
+		if (use_fma) [[likely]]
+		{
+#ifdef _MSC_VER
+			a.vf = _mm_fmadd_ps(a.vf, b.vf, c.vf);
+			return a;
+#else
+			__asm__("vfmadd213ps %[c], %[b], %[a]"
+				: [a] "+x" (a.vf)
+				: [b] "x" (b.vf)
+				, [c] "x" (c.vf));
+			return a;
+#endif
+		}
+
+		for (int i = 0; i < 4; i++)
+		{
+			a._f[i] = std::fmaf(a._f[i], b._f[i], c._f[i]);
+		}
+		return a;
+#else
+		a.vf = _mm_fmadd_ps(a.vf, b.vf, c.vf);
+		return a;
+#endif
+	}
+
 	bool operator==(const v128& right) const
 	{
-		return _u64[0] == right._u64[0] && _u64[1] == right._u64[1];
+		return _mm_movemask_epi8(v128::eq32(*this, right).vi) == 0xffff;
 	}
 
 	bool operator!=(const v128& right) const
 	{
-		return _u64[0] != right._u64[0] || _u64[1] != right._u64[1];
+		return !operator==(right);
 	}
 
 	// result = (~left) & (right)
@@ -316,8 +373,7 @@ union alignas(16) v128
 
 	void clear()
 	{
-		_u64[0] = 0;
-		_u64[1] = 0;
+		*this = {};
 	}
 };
 
@@ -348,7 +404,7 @@ inline v128 operator^(const v128& left, const v128& right)
 
 inline v128 operator~(const v128& other)
 {
-	return v128::from64(~other._u64[0], ~other._u64[1]);
+	return other ^ v128::from32p(UINT32_MAX); // XOR with ones
 }
 
 using stx::se_t;
@@ -436,10 +492,10 @@ template <typename T>
 using to_le_t = typename to_se<T, std::endian::big == std::endian::native>::type;
 
 // BE/LE aliases for atomic_t
-template <typename T>
-using atomic_be_t = atomic_t<be_t<T>>;
-template <typename T>
-using atomic_le_t = atomic_t<le_t<T>>;
+template <typename T, std::size_t Align = alignof(T)>
+using atomic_be_t = atomic_t<be_t<T>, Align>;
+template <typename T, std::size_t Align = alignof(T)>
+using atomic_le_t = atomic_t<le_t<T>, Align>;
 
 template <typename T, bool Se, std::size_t Align>
 struct fmt_unveil<se_t<T, Se, Align>, void>
@@ -451,3 +507,5 @@ struct fmt_unveil<se_t<T, Se, Align>, void>
 		return fmt_unveil<T>::get(arg);
 	}
 };
+
+#endif // BETYPE_H_GUARD

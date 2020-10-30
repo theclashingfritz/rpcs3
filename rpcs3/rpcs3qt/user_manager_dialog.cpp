@@ -2,22 +2,7 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QEvent>
-
-#include "user_manager_dialog.h"
-#include "table_item_delegate.h"
-#include "main_application.h"
-#include "gui_settings.h"
-
-#include "Emu/System.h"
-
-#include "Utilities/StrUtil.h"
-#include "Utilities/File.h"
-#include "util/logs.hpp"
-
-#include <QRegExpValidator>
-#include <QInputDialog>
 #include <QScreen>
-#include <QKeyEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -26,6 +11,18 @@
 #include <QMessageBox>
 #include <QGuiApplication>
 #include <QUrl>
+
+#include "user_manager_dialog.h"
+#include "table_item_delegate.h"
+#include "main_application.h"
+#include "gui_settings.h"
+#include "persistent_settings.h"
+
+#include "Emu/System.h"
+
+#include "Utilities/StrUtil.h"
+#include "Utilities/File.h"
+#include "util/logs.hpp"
 
 constexpr auto qstr = QString::fromStdString;
 
@@ -68,9 +65,10 @@ namespace
 	}
 }
 
-user_manager_dialog::user_manager_dialog(std::shared_ptr<gui_settings> gui_settings, QWidget* parent)
+user_manager_dialog::user_manager_dialog(std::shared_ptr<gui_settings> gui_settings, std::shared_ptr<persistent_settings> persistent_settings, QWidget* parent)
 	: QDialog(parent)
 	, m_gui_settings(gui_settings)
+	, m_persistent_settings(persistent_settings)
 {
 	setWindowTitle(tr("User Manager"));
 	setMinimumSize(QSize(500, 400));
@@ -127,7 +125,19 @@ void user_manager_dialog::Init()
 	vbox_main->addLayout(hbox_buttons);
 	setLayout(vbox_main);
 
-	m_active_user = m_gui_settings->GetValue(gui::um_active_user).toString().toStdString();
+	m_active_user = m_persistent_settings->GetValue(gui::persistent::active_user).toString().toStdString();
+
+	// Handle deprecated value (before August 2nd 2020)
+	if (m_active_user.empty())
+	{
+		m_active_user = m_gui_settings->GetValue(gui::um_active_user).toString().toStdString();
+
+		if (!m_active_user.empty())
+		{
+			m_persistent_settings->SetValue(gui::persistent::active_user, qstr(m_active_user));
+		}
+	}
+
 	UpdateTable();
 
 	restoreGeometry(m_gui_settings->GetValue(gui::um_geometry).toByteArray());
@@ -393,7 +403,7 @@ void user_manager_dialog::OnUserLogin()
 	}
 
 	m_active_user = new_user;
-	m_gui_settings->SetValue(gui::um_active_user, qstr(m_active_user));
+	m_persistent_settings->SetValue(gui::persistent::active_user, qstr(m_active_user));
 	UpdateTable(true);
 	Q_EMIT OnUserLoginSuccess();
 }
@@ -450,7 +460,7 @@ void user_manager_dialog::ShowContextMenu(const QPoint &pos)
 	connect(show_dir_act, &QAction::triggered, [=, this]()
 	{
 		QString path = qstr(m_user_list[key].GetUserDir());
-		QDesktopServices::openUrl(QUrl("file:///" + path));
+		QDesktopServices::openUrl(QUrl::fromLocalFile(path));
 	});
 
 	connect(user_id_act, &QAction::triggered, this, [=, this] {OnSort(0); });

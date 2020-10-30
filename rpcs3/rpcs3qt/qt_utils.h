@@ -8,6 +8,7 @@
 #include <QLabel>
 #include <QTableWidget>
 #include <QHeaderView>
+#include <QTreeWidgetItem>
 
 namespace gui
 {
@@ -42,6 +43,9 @@ namespace gui
 		// Returns the font of the QLabels with object_name
 		QFont get_label_font(const QString& object_name);
 
+		// Returns the width of the text
+		int get_label_width(const QString& text);
+
 		// Returns the part of the image loaded from path that is inside the bounding box of its opaque areas
 		QImage get_opaque_image_area(const QString& path);
 
@@ -62,5 +66,23 @@ namespace gui
 
 		// Open a path in the explorer and mark the file
 		void open_dir(const QString& path);
+
+		// Finds a child of a QTreeWidgetItem with given text
+		QTreeWidgetItem* find_child(QTreeWidgetItem* parent, const QString& text);
+
+		// Finds all children of a QTreeWidgetItem that match the given criteria
+		QList<QTreeWidgetItem*> find_children_by_data(QTreeWidgetItem* parent, const QList<QPair<int /*role*/, QVariant /*data*/>>& criteria, bool recursive);
+
+		// Constructs and adds a child to a QTreeWidgetItem
+		QTreeWidgetItem* add_child(QTreeWidgetItem* parent, const QString& text, int column = 0);
+
+		// Removes all children of a QTreeWidgetItem
+		void remove_children(QTreeWidgetItem* parent);
+
+		// Removes all children of a QTreeWidgetItem that don't match the given criteria
+		void remove_children(QTreeWidgetItem* parent, const QList<QPair<int /*role*/, QVariant /*data*/>>& criteria, bool recursive);
+
+		// Sort a QTreeWidget (currently only column 0)
+		void sort_tree(QTreeWidget* tree, Qt::SortOrder sort_order, bool recursive);
 	} // utils
 } // gui

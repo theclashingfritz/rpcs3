@@ -24,11 +24,12 @@
 
 #include "Emu/Cell/lv2/sys_rsx.h"
 #include "Emu/IdManager.h"
+#include "Emu/system_config.h"
 
 extern u64 get_guest_system_time();
 extern u64 get_system_time();
 
-extern std::atomic<bool> user_asked_for_frame_capture;
+extern std::atomic<bool> g_user_asked_for_frame_capture;
 extern rsx::frame_trace_data frame_debug;
 extern rsx::frame_capture_data frame_capture;
 
@@ -43,11 +44,12 @@ namespace rsx
 	{
 		std::array<atomic_t<u32>, 4096> ea;
 		std::array<atomic_t<u32>, 4096> io;
+		std::array<shared_mutex, 4096> rs;
 
 		rsx_iomap_table() noexcept
 		{
-			std::fill(ea.begin(), ea.end(), -1);
-			std::fill(io.begin(), io.end(), -1);
+			std::memset(ea.data(), -1, sizeof(ea));
+			std::memset(io.data(), -1, sizeof(io));
 		}
 
 		// Try to get the real address given a mapped address
@@ -55,6 +57,46 @@ namespace rsx
 		u32 get_addr(u32 offs) const noexcept
 		{
 			return this->ea[offs >> 20] | (offs & 0xFFFFF);
+		}
+
+		template<bool IsFullLock>
+		bool lock(u32 addr, u32 len) noexcept
+		{
+			if (len <= 1) return false;
+			const u32 end = addr + len - 1;
+
+			for (u32 block = (addr >> 20); block <= (end >> 20); ++block)
+			{
+				if constexpr (IsFullLock)
+				{
+					rs[block].lock();
+				}
+				else
+				{
+					rs[block].lock_shared();
+				}
+			}
+
+			return true;
+		}
+
+		template<bool IsFullLock>
+		void unlock(u32 addr, u32 len) noexcept
+		{
+			ASSERT(len >= 1);
+			const u32 end = addr + len - 1;
+
+			for (u32 block = (addr >> 20); block <= (end >> 20); ++block)
+			{
+				if constexpr (IsFullLock)
+				{
+					rs[block].unlock();
+				}
+				else
+				{
+					rs[block].unlock_shared();
+				}
+			}
 		}
 	};
 
@@ -78,11 +120,16 @@ namespace rsx
 		fragment_texture_state_dirty = 0x80, // Fragment texture parameters changed
 		vertex_texture_state_dirty = 0x100,  // Fragment texture parameters changed
 		scissor_config_state_dirty = 0x200,  // Scissor region changed
+		zclip_config_state_dirty = 0x400,    // Viewport Z clip changed
 
-		scissor_setup_invalid = 0x400,       // Scissor configuration is broken
-		scissor_setup_clipped = 0x800,       // Scissor region is cropped by viewport constraint
+		scissor_setup_invalid = 0x800,       // Scissor configuration is broken
+		scissor_setup_clipped = 0x1000,      // Scissor region is cropped by viewport constraint
+
+		polygon_stipple_pattern_dirty = 0x2000,  // Rasterizer stippling pattern changed
+		line_stipple_pattern_dirty = 0x4000,     // Line stippling pattern changed
 
 		invalidate_pipeline_bits = fragment_program_dirty | vertex_program_dirty,
+		invalidate_zclip_bits = vertex_state_dirty | zclip_config_state_dirty,
 		memory_barrier_bits = framebuffer_reads_dirty,
 		all_dirty = ~0u
 	};
@@ -107,6 +154,17 @@ namespace rsx
 		result_none = 0,
 		result_error = 1,
 		result_zcull_intr = 2
+	};
+
+	enum ROP_control : u32
+	{
+		alpha_test_enable       = (1u << 0),
+		framebuffer_srgb_enable = (1u << 1),
+		csaa_enable             = (1u << 4),
+		msaa_mask_enable        = (1u << 5),
+		msaa_config_mask        = (3u << 6),
+		polygon_stipple_enable  = (1u << 9),
+		alpha_func_mask         = (7u << 16)
 	};
 
 	u32 get_vertex_type_size_on_host(vertex_base_type type, u32 size);
@@ -326,10 +384,10 @@ namespace rsx
 		bool zeta_write_enabled;
 		rsx::surface_target target;
 		rsx::surface_color_format color_format;
-		rsx::surface_depth_format depth_format;
+		rsx::surface_depth_format2 depth_format;
 		rsx::surface_antialiasing aa_mode;
+		rsx::surface_raster_type raster_type;
 		u32 aa_factors[2];
-		bool depth_float;
 		bool ignore_change;
 	};
 
@@ -423,6 +481,9 @@ namespace rsx
 			void write(vm::addr_t sink, u64 timestamp, u32 type, u32 value);
 			void write(queued_report_write* writer, u64 timestamp, u32 value);
 
+			// Retire operation
+			void retire(class ::rsx::thread* ptimer, queued_report_write* writer, u32 result);
+
 		public:
 
 			ZCULL_control();
@@ -442,6 +503,7 @@ namespace rsx
 
 			// Conditionally sync any pending writes if range overlaps
 			flags32_t read_barrier(class ::rsx::thread* ptimer, u32 memory_address, u32 memory_range, flags32_t flags);
+			flags32_t read_barrier(class ::rsx::thread* ptimer, u32 memory_address, occlusion_query_info* query);
 
 			// Call once every 'tick' to update, optional address provided to partially sync until address is processed
 			void update(class ::rsx::thread* ptimer, u32 sync_address = 0, bool hint = false);
@@ -603,7 +665,7 @@ namespace rsx
 		// Framebuffer setup
 		rsx::gcm_framebuffer_info m_surface_info[rsx::limits::color_buffers_count];
 		rsx::gcm_framebuffer_info m_depth_surface_info;
-		framebuffer_layout m_framebuffer_layout;
+		framebuffer_layout m_framebuffer_layout{};
 		bool framebuffer_status_valid = false;
 
 		// Overlays
@@ -618,10 +680,12 @@ namespace rsx
 
 	public:
 		RsxDmaControl* ctrl = nullptr;
+		u32 dma_address{0};
 		rsx_iomap_table iomap_table;
 		u32 restore_point = 0;
 		atomic_t<u32> external_interrupt_lock{ 0 };
 		atomic_t<bool> external_interrupt_ack{ false };
+		bool is_fifo_idle() const;
 		void flush_fifo();
 		void recover_fifo();
 		static void fifo_wake_delay(u64 div = 1);
@@ -676,7 +740,7 @@ namespace rsx
 		u32 main_mem_size{0};
 		u32 local_mem_size{0};
 
-		bool m_rtts_dirty;
+		bool m_rtts_dirty = true;
 		std::array<bool, 16> m_textures_dirty;
 		std::array<bool, 4> m_vertex_textures_dirty;
 		bool m_framebuffer_state_contested = false;
@@ -711,8 +775,10 @@ namespace rsx
 		 * returns whether surface is a render target and surface pitch in native format
 		 */
 		void get_current_fragment_program(const std::array<std::unique_ptr<rsx::sampled_image_descriptor_base>, rsx::limits::fragment_textures_count>& sampler_descriptors);
+
 	public:
 		bool invalidate_fragment_program(u32 dst_dma, u32 dst_offset, u32 size);
+		void on_framebuffer_options_changed(u32 opt);
 
 	public:
 		u64 target_rsx_flip_time = 0;
@@ -940,4 +1006,65 @@ namespace rsx
 	{
 		return g_fxo->get<rsx::thread>();
 	}
+
+	template<bool IsFullLock = false>
+	class reservation_lock
+	{
+		u32 addr = 0, length = 0;
+		bool locked = false;
+
+		inline void lock_range(u32 addr, u32 length)
+		{
+			this->addr = addr;
+			this->length = length;
+
+			auto renderer = get_current_renderer();
+			this->locked = renderer->iomap_table.lock<IsFullLock>(addr, length);
+		}
+
+	public:
+		reservation_lock(u32 addr, u32 length)
+		{
+			if (g_cfg.core.rsx_accurate_res_access &&
+				addr < constants::local_mem_base)
+			{
+				lock_range(addr, length);
+			}
+		}
+
+		// Multi-range lock. If ranges overlap, the combined range will be acquired.
+		// If ranges do not overlap, the first range that is in main memory will be acquired.
+		reservation_lock(u32 dst_addr, u32 dst_length, u32 src_addr, u32 src_length)
+		{
+			if (g_cfg.core.rsx_accurate_res_access)
+			{
+				const auto range1 = utils::address_range::start_length(dst_addr, dst_length);
+				const auto range2 = utils::address_range::start_length(src_addr, src_length);
+				utils::address_range target_range;
+
+				if (!range1.overlaps(range2)) [[likely]]
+				{
+					target_range = (dst_addr < constants::local_mem_base) ? range1 : range2;
+				}
+				else
+				{
+					// Very unlikely
+					target_range = range1.get_min_max(range2);
+				}
+
+				if (target_range.start < constants::local_mem_base)
+				{
+					lock_range(target_range.start, target_range.length());
+				}
+			}
+		}
+
+		~reservation_lock()
+		{
+			if (locked)
+			{
+				get_current_renderer()->iomap_table.unlock<IsFullLock>(addr, length);
+			}
+		}
+	};
 }

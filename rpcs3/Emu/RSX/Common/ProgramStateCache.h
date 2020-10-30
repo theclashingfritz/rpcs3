@@ -18,15 +18,6 @@ enum class SHADER_TYPE
 
 namespace program_hash_util
 {
-	// Based on
-	// https://github.com/AlexAltea/nucleus/blob/master/nucleus/gpu/rsx_pgraph.cpp
-	// TODO: eliminate it and implement independent hash utility
-	union qword
-	{
-		u64 dword[2];
-		u32 word[4];
-	};
-
 	struct vertex_program_utils
 	{
 		struct vertex_program_metadata
@@ -59,6 +50,10 @@ namespace program_hash_util
 			u32 program_ucode_length;
 			u32 program_constants_buffer_length;
 			u16 referenced_textures_mask;
+
+			bool has_pack_instructions;
+			bool has_branch_instructions;
+			bool is_nop_shader;           // Does this affect Z-pass testing???
 		};
 
 		/**
@@ -66,9 +61,9 @@ namespace program_hash_util
 		*/
 		static bool is_constant(u32 sourceOperand);
 
-		static size_t get_fragment_program_ucode_size(void *ptr);
+		static size_t get_fragment_program_ucode_size(const void* ptr);
 
-		static fragment_program_metadata analyse_fragment_program(void *ptr);
+		static fragment_program_metadata analyse_fragment_program(const void* ptr);
 
 		static size_t get_fragment_program_ucode_hash(const RSXFragmentProgram &program);
 	};

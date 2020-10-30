@@ -3,6 +3,7 @@
 #include "sha1.h"
 #include "utils.h"
 #include "unself.h"
+#include "Utilities/BEType.h"
 #include "Emu/VFS.h"
 #include "Emu/System.h"
 
@@ -1111,8 +1112,12 @@ bool SELFDecrypter::DecryptNPDRM(u8 *metadata, u32 metadata_size)
 
 	if (ctrl->npdrm.license == 1)  // Network license.
 	{
-		self_log.error("SELF: Can't decrypt network NPDRM!");
-		return false;
+		// Try to find a RAP file to get the key.
+		if (!GetKeyFromRap(ctrl->npdrm.content_id, npdrm_key))
+		{
+			self_log.error("SELF: Can't decrypt network NPDRM!");
+			return false;
+		}
 	}
 	else if (ctrl->npdrm.license == 2)  // Local license.
 	{
@@ -1483,9 +1488,7 @@ bool verify_npdrm_self_headers(const fs::file& self, u8* klic_key)
 	return true;
 }
 
-std::array<u8, 0x10> get_default_self_klic()
+v128 get_default_self_klic()
 {
-	std::array<u8, 0x10> key;
-	std::copy(std::begin(NP_KLIC_FREE), std::end(NP_KLIC_FREE), std::begin(key));
-	return key;
+	return std::bit_cast<v128>(NP_KLIC_FREE);
 }

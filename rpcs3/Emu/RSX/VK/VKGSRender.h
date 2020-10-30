@@ -8,6 +8,8 @@
 #include "VKOverlays.h"
 #include "VKProgramBuffer.h"
 #include "VKFramebuffer.h"
+#include "VKShaderInterpreter.h"
+#include "VKQueryPool.h"
 #include "../GCM.h"
 
 #include <thread>
@@ -207,6 +209,7 @@ namespace vk
 		s64 frag_texparam_heap_ptr = 0;
 		s64 index_heap_ptr = 0;
 		s64 texture_upload_heap_ptr = 0;
+		s64 rasterizer_env_heap_ptr = 0;
 
 		u64 last_frame_sync_time = 0;
 
@@ -229,6 +232,7 @@ namespace vk
 			vtx_const_heap_ptr = other.vtx_const_heap_ptr;
 			index_heap_ptr = other.index_heap_ptr;
 			texture_upload_heap_ptr = other.texture_upload_heap_ptr;
+			rasterizer_env_heap_ptr = other.rasterizer_env_heap_ptr;
 		}
 
 		//Exchange storage (non-copyable)
@@ -237,7 +241,10 @@ namespace vk
 			std::swap(buffer_views_to_clean, other.buffer_views_to_clean);
 		}
 
-		void tag_frame_end(s64 attrib_loc, s64 vtxenv_loc, s64 fragenv_loc, s64 vtxlayout_loc, s64 fragtex_loc, s64 fragconst_loc,s64 vtxconst_loc, s64 index_loc, s64 texture_loc)
+		void tag_frame_end(
+			s64 attrib_loc, s64 vtxenv_loc, s64 fragenv_loc, s64 vtxlayout_loc,
+			s64 fragtex_loc, s64 fragconst_loc,s64 vtxconst_loc, s64 index_loc,
+			s64 texture_loc, s64 rasterizer_loc)
 		{
 			attrib_heap_ptr = attrib_loc;
 			vtx_env_heap_ptr = vtxenv_loc;
@@ -248,6 +255,7 @@ namespace vk
 			vtx_const_heap_ptr = vtxconst_loc;
 			index_heap_ptr = index_loc;
 			texture_upload_heap_ptr = texture_loc;
+			rasterizer_env_heap_ptr = rasterizer_loc;
 
 			last_frame_sync_time = get_system_time();
 		}
@@ -349,7 +357,8 @@ private:
 private:
 	VKFragmentProgram m_fragment_prog;
 	VKVertexProgram m_vertex_prog;
-	vk::glsl::program *m_program;
+	vk::glsl::program *m_program = nullptr;
+	vk::pipeline_props m_pipeline_properties;
 
 	vk::texture_cache m_texture_cache;
 	rsx::vk_render_targets m_rtts;
@@ -358,10 +367,6 @@ private:
 	std::unique_ptr<vk::buffer_view> null_buffer_view;
 
 	std::unique_ptr<vk::text_writer> m_text_writer;
-	std::unique_ptr<vk::depth_convert_pass> m_depth_converter;
-	std::unique_ptr<vk::ui_overlay_renderer> m_ui_renderer;
-	std::unique_ptr<vk::attachment_clear_pass> m_attachment_clear_pass;
-	std::unique_ptr<vk::video_out_calibration_pass> m_video_output_pass;
 
 	std::unique_ptr<vk::buffer> m_cond_render_buffer;
 	u64 m_cond_render_sync_tag = 0;
@@ -393,7 +398,7 @@ private:
 
 	//Vulkan internals
 	vk::command_pool m_command_buffer_pool;
-	vk::occlusion_query_pool m_occlusion_query_pool;
+	std::unique_ptr<vk::query_pool_manager> m_occlusion_query_manager;
 	bool m_occlusion_query_active = false;
 	rsx::reports::occlusion_query_info *m_active_query_info = nullptr;
 	std::vector<vk::occlusion_data> m_occlusion_map;
@@ -427,6 +432,10 @@ private:
 	vk::data_heap m_vertex_layout_ring_info;           // Vertex layout structure
 	vk::data_heap m_index_buffer_ring_info;            // Index data
 	vk::data_heap m_texture_upload_buffer_ring_info;   // Texture upload heap
+	vk::data_heap m_raster_env_ring_info;              // Raster control such as polygon and line stipple
+
+	vk::data_heap m_fragment_instructions_buffer;
+	vk::data_heap m_vertex_instructions_buffer;
 
 	VkDescriptorBufferInfo m_vertex_env_buffer_info;
 	VkDescriptorBufferInfo m_fragment_env_buffer_info;
@@ -434,6 +443,10 @@ private:
 	VkDescriptorBufferInfo m_vertex_constants_buffer_info;
 	VkDescriptorBufferInfo m_fragment_constants_buffer_info;
 	VkDescriptorBufferInfo m_fragment_texture_params_buffer_info;
+	VkDescriptorBufferInfo m_raster_env_buffer_info;
+
+	VkDescriptorBufferInfo m_vertex_instructions_buffer_info;
+	VkDescriptorBufferInfo m_fragment_instructions_buffer_info;
 
 	std::array<vk::frame_context_t, VK_MAX_ASYNC_FRAMES> frame_context_storage;
 	//Temp frame context to use if the real frame queue is overburdened. Only used for storage
@@ -463,6 +476,9 @@ private:
 
 	//Vertex layout
 	rsx::vertex_input_layout m_vertex_layout;
+
+	vk::shader_interpreter m_shader_interpreter;
+	u32 m_interpreter_state;
 
 #if defined(HAVE_X11) && defined(HAVE_VULKAN)
 	Display *m_display_handle = nullptr;
@@ -512,6 +528,7 @@ private:
 
 	void load_texture_env();
 	void bind_texture_env();
+	void bind_interpreter_texture_env();
 
 public:
 	void init_buffers(rsx::framebuffer_creation_context context, bool skip_reading = false);
@@ -529,6 +546,9 @@ public:
 
 	// External callback in case we need to suddenly submit a commandlist unexpectedly, e.g in a violation handler
 	void emergency_query_cleanup(vk::command_buffer* commands);
+
+	// External callback to handle out of video memory problems
+	bool on_vram_exhausted(rsx::problem_severity severity);
 
 	// Conditional rendering
 	void begin_conditional_rendering(const std::vector<rsx::reports::occlusion_query_info*>& sources) override;

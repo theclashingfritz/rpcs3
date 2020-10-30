@@ -7,31 +7,18 @@
 
 #include <memory>
 
-struct gui_save
-{
-	QString key;
-	QString name;
-	QVariant def;
-
-	gui_save()
-	{
-		key = "";
-		name = "";
-		def = QVariant();
-	}
-
-	gui_save(const QString& k, const QString& n, const QVariant& d)
-	{
-		key = k;
-		name = n;
-		def = d;
-	}
-};
+#include "gui_save.h"
 
 typedef QPair<QString, QString> q_string_pair;
 typedef QPair<QString, QSize> q_size_pair;
 typedef QList<q_string_pair> q_pair_list;
 typedef QList<q_size_pair> q_size_list;
+
+namespace gui
+{
+	const QString savedata = "SaveData";
+	const QString users    = "Users";
+}
 
 // Parent Class for GUI settings
 class settings : public QObject
@@ -44,8 +31,8 @@ public:
 
 	QString GetSettingsDir() const;
 
-	QVariant GetValue(const gui_save& entry);
-	QVariant GetValue(const QString& key, const QString& name, const QString& def);
+	QVariant GetValue(const gui_save& entry) const;
+	QVariant GetValue(const QString& key, const QString& name, const QVariant& def) const;
 	static QVariant List2Var(const q_pair_list& list);
 	static q_pair_list Var2List(const QVariant& var);
 
@@ -55,6 +42,7 @@ public Q_SLOTS:
 
 	/** Write value to entry */
 	void SetValue(const gui_save& entry, const QVariant& value);
+	void SetValue(const QString& key, const QVariant& value);
 	void SetValue(const QString& key, const QString& name, const QVariant& value);
 
 protected:

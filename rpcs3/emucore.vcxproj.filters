@@ -75,6 +75,18 @@
     <Filter Include="Emu\NP">
       <UniqueIdentifier>{652ce43e-72db-42cd-831a-0e194f67e731}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Emu\GPU\RSX\Common\Interpreter">
+      <UniqueIdentifier>{bc97b324-1eea-445a-8fa9-6fc49e3df47c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Emu\Audio\FAudio">
+      <UniqueIdentifier>{7555ff6f-67a9-4d02-b744-0bf896751edb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Emu\Audio\ALSA">
+      <UniqueIdentifier>{c76057f1-bb19-4981-8ab0-5ba20ac27552}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Emu\Audio\Pulse">
+      <UniqueIdentifier>{84c0e40e-efb6-4cfd-b2f5-13c720b09105}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Crypto\aes.cpp">
@@ -869,6 +881,9 @@
     <ClCompile Include="util\cereal.cpp">
       <Filter>Utilities</Filter>
     </ClCompile>
+    <ClCompile Include="util\shared_cptr.cpp">
+      <Filter>Utilities</Filter>
+    </ClCompile>
     <ClCompile Include="util\fixed_typemap.cpp">
       <Filter>Utilities</Filter>
     </ClCompile>
@@ -911,7 +926,13 @@
     <ClCompile Include="Emu\RSX\Overlays\overlay_utils.cpp">
       <Filter>Emu\GPU\RSX\Overlays</Filter>
     </ClCompile>
+    <ClCompile Include="Emu\NP\fb_helpers.cpp">
+      <Filter>Emu\NP</Filter>
+    </ClCompile>
     <ClCompile Include="Emu\NP\np_handler.cpp">
+      <Filter>Emu\NP</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\NP\signaling_handler.cpp">
       <Filter>Emu\NP</Filter>
     </ClCompile>
     <ClCompile Include="Emu\RSX\Overlays\overlay_osk_panel.cpp">
@@ -925,6 +946,33 @@
     </ClCompile>
     <ClCompile Include="util\shared_cptr.cpp">
       <Filter>Utilities</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\Audio\FAudio\FAudioBackend.cpp">
+      <Filter>Emu\Audio\FAudio</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\Audio\ALSA\ALSABackend.cpp">
+      <Filter>Emu\Audio\ALSA</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\Audio\Pulse\PulseBackend.cpp">
+      <Filter>Emu\Audio\Pulse</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Utilities\cheat_info.cpp">
+      <Filter>Utilities</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\NP\np_structs_extra.cpp">
+      <Filter>Emu\NP</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\NP\rpcn_client.cpp">
+      <Filter>Emu\NP</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\NP\rpcn_config.cpp">
+      <Filter>Emu\NP</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\localized_string.cpp">
+      <Filter>Emu</Filter>
+    </ClCompile>
+    <ClCompile Include="Emu\perf_meter.cpp">
+      <Filter>Emu</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -1351,6 +1399,9 @@
     <ClInclude Include="Emu\Cell\Modules\cellPngDec.h">
       <Filter>Emu\Cell\Modules</Filter>
     </ClInclude>
+    <ClInclude Include="Emu\Cell\Modules\cellPngEnc.h">
+      <Filter>Emu\Cell\Modules</Filter>
+    </ClInclude>
     <ClInclude Include="Emu\Cell\Modules\cellResc.h">
       <Filter>Emu\Cell\Modules</Filter>
     </ClInclude>
@@ -1756,6 +1807,9 @@
     <ClInclude Include="Emu\NP\np_handler.h">
       <Filter>Emu\NP</Filter>
     </ClInclude>
+    <ClInclude Include="Emu\NP\signaling_handler.h">
+      <Filter>Emu\NP</Filter>
+    </ClInclude>
     <ClInclude Include="Emu\RSX\Overlays\overlay_osk_panel.h">
       <Filter>Emu\GPU\RSX\Overlays</Filter>
     </ClInclude>
@@ -1783,5 +1837,49 @@
     <ClInclude Include="util\typeindices.hpp">
       <Filter>Utilities</Filter>
     </ClInclude>
+    <ClInclude Include="Emu\RSX\Common\ShaderInterpreter.h">
+      <Filter>Emu\GPU\RSX\Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\Audio\FAudio\FAudioBackend.h">
+      <Filter>Emu\Audio\FAudio</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\Audio\ALSA\ALSABackend.h">
+      <Filter>Emu\Audio\ALSA</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\Audio\Pulse\PulseBackend.h">
+      <Filter>Emu\Audio\Pulse</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Utilities\cheat_info.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\NP\np_structs_extra.h">
+      <Filter>Emu\NP</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\NP\rpcn_client.h">
+      <Filter>Emu\NP</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\NP\generated\np2_structs_generated.h">
+      <Filter>Emu\NP</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\NP\rpcn_config.h">
+      <Filter>Emu\NP</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\localized_string.h">
+      <Filter>Emu</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\localized_string_id.h">
+      <Filter>Emu</Filter>
+    </ClInclude>
+    <ClInclude Include="Emu\perf_meter.hpp">
+      <Filter>Emu</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Emu\RSX\Common\Interpreter\FragmentInterpreter.glsl">
+      <Filter>Emu\GPU\RSX\Common\Interpreter</Filter>
+    </None>
+    <None Include="Emu\RSX\Common\Interpreter\VertexInterpreter.glsl">
+      <Filter>Emu\GPU\RSX\Common\Interpreter</Filter>
+    </None>
   </ItemGroup>
 </Project>

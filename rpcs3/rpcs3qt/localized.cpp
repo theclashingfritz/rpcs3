@@ -4,77 +4,54 @@ Localized::Localized()
 {
 }
 
-QString Localized::GetVerboseTimeByMs(qint64 elapsed_ms) const
+QString Localized::GetVerboseTimeByMs(quint64 elapsed_ms, bool show_days) const
 {
-	if (elapsed_ms <= 0)
+	const quint64 elapsed_seconds = (elapsed_ms / 1000) + ((elapsed_ms % 1000) > 0 ? 1 : 0);
+	quint64 hours = elapsed_seconds / 3600;
+
+	quint64 days = 0;
+	if (show_days)
 	{
-		return "";
+		days = hours / 24;
+		hours = hours % 24;
 	}
+	const quint64 minutes = (elapsed_seconds % 3600) / 60;
+	const quint64 seconds = (elapsed_seconds % 3600) % 60;
 
-	const qint64 elapsed_seconds = (elapsed_ms / 1000) + ((elapsed_ms % 1000) > 0 ? 1 : 0);
+	const QString str_days    = tr("%Ln day(s)", "", days);
+	const QString str_hours   = tr("%Ln hour(s)", "", hours);
+	const QString str_minutes = tr("%Ln minute(s)", "", minutes);
+	const QString str_seconds = tr("%Ln second(s)", "", seconds);
 
-	const qint64 hours   = elapsed_seconds / 3600;
-	const qint64 minutes = (elapsed_seconds % 3600) / 60;
-	const qint64 seconds = (elapsed_seconds % 3600) % 60;
-
-	// For anyone who was wondering why there need to be so many cases:
-	// 1. Using variables won't work for future localization due to varying sentence structure in different languages.
-	// 2. The provided Qt functionality only works if localization is already enabled
-	// 3. The provided Qt functionality only works for single variables
-
-	if (hours <= 0)
+	if (days != 0)
 	{
-		if (minutes <= 0)
+		if (hours == 0)
+			return str_days;
+		else
+			return tr("%0 and %1", "Days and hours").arg(str_days).arg(str_hours);
+	}
+	else
+	{
+		if (hours != 0)
 		{
-			if (seconds == 1)
+			if (minutes == 0)
+				return str_hours;
+			else
+				return tr("%0 and %1", "Hours and minutes").arg(str_hours).arg(str_minutes);
+		}
+		else
+		{
+			if (minutes != 0)
 			{
-				return tr("%0 second").arg(seconds);
+				if (seconds != 0)
+					return tr("%0 and %1", "Minutes and seconds").arg(str_minutes).arg(str_seconds);
+				else
+					return str_minutes;
 			}
-			return tr("%0 seconds").arg(seconds);
-		}
-
-		if (seconds <= 0)
-		{
-			if (minutes == 1)
+			else
 			{
-				return tr("%0 minute").arg(minutes);
+				return str_seconds;
 			}
-			return tr("%0 minutes").arg(minutes);
 		}
-		if (minutes == 1 && seconds == 1)
-		{
-			return tr("%0 minute and %1 second").arg(minutes).arg(seconds);
-		}
-		if (minutes == 1)
-		{
-			return tr("%0 minute and %1 seconds").arg(minutes).arg(seconds);
-		}
-		if (seconds == 1)
-		{
-			return tr("%0 minutes and %1 second").arg(minutes).arg(seconds);
-		}
-		return tr("%0 minutes and %1 seconds").arg(minutes).arg(seconds);
 	}
-
-	if (minutes <= 0)
-	{
-		if (hours == 1)
-		{
-			return tr("%0 hour").arg(hours);
-		}
-		return tr("%0 hours").arg(hours);
-	}
-	if (hours == 1 && minutes == 1)
-	{
-		return tr("%0 hour and %1 minute").arg(hours).arg(minutes);
-	}
-	if (hours == 1)
-	{
-		return tr("%0 hour and %1 minutes").arg(hours).arg(minutes);
-	}
-	if (minutes == 1)
-	{
-		return tr("%0 hours and %1 minute").arg(hours).arg(minutes);
-	}
-	return tr("%0 hours and %1 minutes").arg(hours).arg(minutes);
 }

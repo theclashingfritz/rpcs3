@@ -27,7 +27,7 @@ struct lv2_lwcond final : lv2_obj
 
 	const be_t<u64> name;
 	const u32 lwid;
-	const u32 protocol;
+	const lv2_protocol protocol;
 	vm::ptr<sys_lwcond_t> control;
 
 	shared_mutex mutex;
@@ -37,7 +37,7 @@ struct lv2_lwcond final : lv2_obj
 	lv2_lwcond(u64 name, u32 lwid, u32 protocol, vm::ptr<sys_lwcond_t> control)
 		: name(std::bit_cast<be_t<u64>>(name))
 		, lwid(lwid)
-		, protocol(protocol)
+		, protocol{protocol}
 		, control(control)
 	{
 	}
@@ -50,6 +50,6 @@ class ppu_thread;
 
 error_code _sys_lwcond_create(ppu_thread& ppu, vm::ptr<u32> lwcond_id, u32 lwmutex_id, vm::ptr<sys_lwcond_t> control, u64 name);
 error_code _sys_lwcond_destroy(ppu_thread& ppu, u32 lwcond_id);
-error_code _sys_lwcond_signal(ppu_thread& ppu, u32 lwcond_id, u32 lwmutex_id, u32 ppu_thread_id, u32 mode);
+error_code _sys_lwcond_signal(ppu_thread& ppu, u32 lwcond_id, u32 lwmutex_id, u64 ppu_thread_id, u32 mode);
 error_code _sys_lwcond_signal_all(ppu_thread& ppu, u32 lwcond_id, u32 lwmutex_id, u32 mode);
 error_code _sys_lwcond_queue_wait(ppu_thread& ppu, u32 lwcond_id, u32 lwmutex_id, u64 timeout);

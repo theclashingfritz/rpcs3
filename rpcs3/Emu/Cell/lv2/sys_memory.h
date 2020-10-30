@@ -59,14 +59,15 @@ struct lv2_memory_container
 	}
 
 	// Try to get specified amount of "physical" memory
-	u32 take(u32 amount)
+	// Values greater than UINT32_MAX will fail
+	u32 take(u64 amount)
 	{
 		auto [_, result] = used.fetch_op([&](u32& value) -> u32
 		{
 			if (size - value >= amount)
 			{
-				value += amount;
-				return amount;
+				value += static_cast<u32>(amount);
+				return static_cast<u32>(amount);
 			}
 
 			return 0;
@@ -74,21 +75,6 @@ struct lv2_memory_container
 
 		return result;
 	}
-};
-
-struct lv2_memory_alloca
-{
-	static const u32 id_base = 0x1;
-	static const u32 id_step = 0x1;
-	static const u32 id_count = 0x2000;
-
-	const u32 size; // Memory size
-	const u32 align; // Alignment required
-	const u64 flags;
-	const std::shared_ptr<lv2_memory_container> ct;
-	const std::shared_ptr<utils::shm> shm;
-
-	lv2_memory_alloca(u32 size, u32 align, u64 flags, const std::shared_ptr<lv2_memory_container>& ct);
 };
 
 struct sys_memory_user_memory_stat_t

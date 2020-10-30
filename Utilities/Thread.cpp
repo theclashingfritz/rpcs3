@@ -1230,7 +1230,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 		}
 	};
 
-	if ((d_size | (d_size + addr)) >= 0x100000000ull)
+	if (0x1'0000'0000ull - addr < d_size)
 	{
 		sig_log.error("Invalid d_size (0x%llx)", d_size);
 		report_opcode();
@@ -1240,7 +1240,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 	// get length of data being accessed
 	size_t a_size = get_x64_access_size(context, op, reg, d_size, i_size);
 
-	if ((a_size | (a_size + addr)) >= 0x100000000ull)
+	if (0x1'0000'0000ull - addr < a_size)
 	{
 		sig_log.error("Invalid a_size (0x%llx)", a_size);
 		report_opcode();
@@ -1248,20 +1248,26 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 	}
 
 	// check if address is RawSPU MMIO register
-	if (addr - RAW_SPU_BASE_ADDR < (6 * RAW_SPU_OFFSET) && (addr % RAW_SPU_OFFSET) >= RAW_SPU_PROB_OFFSET)
+	do if (addr - RAW_SPU_BASE_ADDR < (6 * RAW_SPU_OFFSET) && (addr % RAW_SPU_OFFSET) >= RAW_SPU_PROB_OFFSET)
 	{
 		auto thread = idm::get<named_thread<spu_thread>>(spu_thread::find_raw_spu((addr - RAW_SPU_BASE_ADDR) / RAW_SPU_OFFSET));
 
 		if (!thread)
 		{
-			return false;
+			break;
 		}
 
-		if (a_size != 4 || !d_size || !i_size)
+		if (!a_size || !d_size || !i_size)
 		{
 			sig_log.error("Invalid or unsupported instruction (op=%d, reg=%d, d_size=%lld, a_size=0x%llx, i_size=%lld)", +op, +reg, d_size, a_size, i_size);
 			report_opcode();
 			return false;
+		}
+
+		if (a_size != 4)
+		{
+			// Might be unimplemented, such as writing MFC proxy EAL+EAH using 64-bit store
+			break;
 		}
 
 		switch (op)
@@ -1342,7 +1348,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 		RIP(context) += i_size;
 		g_tls_fault_spu++;
 		return true;
-	}
+	} while (0);
 
 	if (vm::check_addr(addr, std::max(1u, ::narrow<u32>(d_size)), is_writing ? vm::page_writable : vm::page_readable))
 	{
@@ -1382,6 +1388,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 
 	if (cpu)
 	{
+		vm::temporary_unlock(*cpu);
 		u32 pf_port_id = 0;
 
 		if (auto pf_entries = g_fxo->get<page_fault_notification_entries>(); true)
@@ -1416,7 +1423,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 			{
 				const auto& spu = static_cast<spu_thread&>(*cpu);
 
-				const u64 type = spu.offset < RAW_SPU_BASE_ADDR ?
+				const u64 type = spu.get_type() == spu_type::threaded ?
 					SYS_MEMORY_PAGE_FAULT_TYPE_SPU_THREAD :
 					SYS_MEMORY_PAGE_FAULT_TYPE_RAW_SPU;
 
@@ -1441,55 +1448,63 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 				}
 			}
 
+			// Deschedule
+			if (cpu->id_type() == 1)
+			{
+				lv2_obj::sleep(*cpu);
+			}
+
 			// Now, place the page fault event onto table so that other functions [sys_mmapper_free_address and pagefault recovery funcs etc]
 			// know that this thread is page faulted and where.
 
 			auto pf_events = g_fxo->get<page_fault_event_entries>();
 			{
 				std::lock_guard pf_lock(pf_events->pf_mutex);
-				pf_events->events.emplace(static_cast<u32>(data2), addr);
+				pf_events->events.emplace(cpu, addr);
 			}
 
-			sig_log.error("Page_fault %s location 0x%x because of %s memory", is_writing ? "writing" : "reading",
+			sig_log.warning("Page_fault %s location 0x%x because of %s memory", is_writing ? "writing" : "reading",
 				addr, data3 == SYS_MEMORY_PAGE_FAULT_CAUSE_READ_ONLY ? "writing read-only" : "using unmapped");
+
+			if (cpu->id_type() == 1)
+			{
+				if (const auto func = static_cast<ppu_thread*>(cpu)->current_function)
+				{
+					sig_log.warning("Page_fault while in function %s", func);
+				}
+			}
 
 			error_code sending_error = sys_event_port_send(pf_port_id, data1, data2, data3);
 
 			// If we fail due to being busy, wait a bit and try again.
 			while (static_cast<u32>(sending_error) == CELL_EBUSY)
 			{
-				if (cpu->id_type() == 1)
+				if (cpu->is_stopped())
 				{
-					lv2_obj::sleep(*cpu, 1000);
+					sending_error = {};
+					break;
 				}
 
 				thread_ctrl::wait_for(1000);
 				sending_error = sys_event_port_send(pf_port_id, data1, data2, data3);
 			}
 
-			if (cpu->id_type() == 1)
-			{
-				// Deschedule
-				lv2_obj::sleep(*cpu);
-			}
-
 			if (sending_error)
 			{
-				vm_log.fatal("Unknown error %x while trying to pass page fault.", +sending_error);
-				cpu->state += cpu_flag::dbg_pause;
+				vm_log.fatal("Unknown error 0x%x while trying to pass page fault.", +sending_error);
 			}
-
-			// Wait until the thread is recovered
-			for (std::shared_lock pf_lock(pf_events->pf_mutex);
-				pf_events->events.count(static_cast<u32>(data2)) && !sending_error;)
+			else
 			{
-				if (cpu->is_stopped())
+				// Wait until the thread is recovered
+				while (!cpu->state.test_and_reset(cpu_flag::signal))
 				{
-					break;
-				}
+					if (cpu->is_stopped())
+					{
+						break;
+					}
 
-				// Timeout in case the emulator is stopping
-				pf_events->cond.wait(pf_lock, 10000);
+					thread_ctrl::wait();
+				}
 			}
 
 			// Reschedule, test cpu state and try recovery if stopped
@@ -1506,7 +1521,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 			if (!access_violation_recovered)
 			{
 				vm_log.notice("\n%s", cpu->dump_all());
-				vm_log.error("Access violation %s location 0x%x (%s)", is_writing ? "writing" : "reading", addr, (is_writing && vm::check_addr(addr)) ? "read-only memory" : "unmapped memory");
+				vm_log.error("Access violation %s location 0x%x (%s) [type=u%u]", is_writing ? "writing" : "reading", addr, (is_writing && vm::check_addr(addr)) ? "read-only memory" : "unmapped memory", d_size * 8);
 			}
 
 			// TODO:
@@ -1543,7 +1558,7 @@ bool handle_access_violation(u32 addr, bool is_writing, x64_context* context) no
 	// Do not log any further access violations in this case.
 	if (!access_violation_recovered)
 	{
-		vm_log.fatal("Access violation %s location 0x%x (%s)", is_writing ? "writing" : "reading", addr, (is_writing && vm::check_addr(addr)) ? "read-only memory" : "unmapped memory");
+		vm_log.fatal("Access violation %s location 0x%x (%s) [type=u%u]", is_writing ? "writing" : "reading", addr, (is_writing && vm::check_addr(addr)) ? "read-only memory" : "unmapped memory", d_size * 8);
 	}
 
 	while (Emu.IsPaused())
@@ -1649,10 +1664,10 @@ static LONG exception_filter(PEXCEPTION_POINTERS pExp) noexcept
 		//const auto uw = (u8*)(unwind_base + rtf->UnwindData);
 	}
 
-	for (HMODULE module : modules)
+	for (HMODULE _module : modules)
 	{
 		MODULEINFO info;
-		if (GetModuleInformation(GetCurrentProcess(), module, &info, sizeof(info)))
+		if (GetModuleInformation(GetCurrentProcess(), _module, &info, sizeof(info)))
 		{
 			const DWORD64 base = reinterpret_cast<DWORD64>(info.lpBaseOfDll);
 
@@ -1662,7 +1677,7 @@ static LONG exception_filter(PEXCEPTION_POINTERS pExp) noexcept
 				for (DWORD size = 15; module_name.size() != size;)
 				{
 					module_name.resize(size);
-					size = GetModuleBaseNameA(GetCurrentProcess(), module, &module_name.front(), size + 1);
+					size = GetModuleBaseNameA(GetCurrentProcess(), _module, &module_name.front(), size + 1);
 					if (!size)
 					{
 						module_name.clear();
@@ -1883,7 +1898,18 @@ void thread_base::initialize(void (*error_cb)(), bool(*wait_cb)(const void*))
 
 void thread_base::notify_abort() noexcept
 {
-	atomic_storage_futex::raw_notify(+m_state_notifier);
+	m_signal.try_inc();
+
+	while (auto ptr = m_state_notifier.load())
+	{
+		// Since this function is not perfectly implemented, run it in a loop
+		atomic_storage_futex::raw_notify(ptr);
+
+		if (m_state_notifier.load() == ptr)
+		{
+			break;
+		}
+	}
 }
 
 bool thread_base::finalize(thread_state result_state) noexcept
@@ -1944,7 +1970,7 @@ bool thread_base::finalize(thread_state result_state) noexcept
 
 void thread_base::finalize() noexcept
 {
-	atomic_storage_futex::set_wait_callback([](const void*){ return true; });
+	atomic_storage_futex::set_wait_callback(nullptr);
 	g_tls_log_prefix = []() -> std::string { return {}; };
 	thread_ctrl::g_tls_this_thread = nullptr;
 }
@@ -2146,7 +2172,7 @@ void thread_ctrl::detect_cpu_layout()
 	if (!g_native_core_layout.compare_and_swap_test(native_core_arrangement::undefined, native_core_arrangement::generic))
 		return;
 
-	const auto system_id = utils::get_system_info();
+	const auto system_id = utils::get_cpu_brand();
 	if (system_id.find("Ryzen") != umax)
 	{
 		g_native_core_layout.store(native_core_arrangement::amd_ccx);
@@ -2218,7 +2244,7 @@ u64 thread_ctrl::get_affinity_mask(thread_class group)
 		case native_core_arrangement::amd_ccx:
 		{
 			u64 spu_mask, ppu_mask, rsx_mask;
-			const auto system_id = utils::get_system_info();
+			const auto system_id = utils::get_cpu_brand();
 			if (thread_count >= 32)
 			{
 				if (system_id.find("3950X") != umax)
@@ -2391,6 +2417,30 @@ void thread_ctrl::set_native_priority(int priority)
 #endif
 }
 
+u64 thread_ctrl::get_process_affinity_mask()
+{
+	static const u64 mask = []() -> u64
+	{
+#ifdef _WIN32
+		DWORD_PTR res, _sys;
+		if (!GetProcessAffinityMask(GetCurrentProcess(), &res, &_sys))
+		{
+			sig_log.error("Failed to get process affinity mask.");
+			return 0;
+		}
+
+		return res;
+#else
+		// Assume it's called from the main thread (this is a bit shaky)
+		return thread_ctrl::get_thread_affinity_mask();
+#endif
+	}();
+
+	return mask;
+}
+
+DECLARE(thread_ctrl::process_affinity_mask) = get_process_affinity_mask();
+
 void thread_ctrl::set_thread_affinity_mask(u64 mask)
 {
 #ifdef _WIN32
@@ -2398,7 +2448,7 @@ void thread_ctrl::set_thread_affinity_mask(u64 mask)
 	SetThreadAffinityMask(_this_thread, mask);
 #elif __APPLE__
 	// Supports only one core
-	thread_affinity_policy_data_t policy = { static_cast<integer_t>(utils::cnttz64(mask)) };
+	thread_affinity_policy_data_t policy = { static_cast<integer_t>(std::countr_zero(mask)) };
 	thread_port_t mach_thread = pthread_mach_thread_np(pthread_self());
 	thread_policy_set(mach_thread, THREAD_AFFINITY_POLICY, reinterpret_cast<thread_policy_t>(&policy), 1);
 #elif defined(__linux__) || defined(__DragonFly__) || defined(__FreeBSD__)
@@ -2423,6 +2473,61 @@ void thread_ctrl::set_thread_affinity_mask(u64 mask)
 		}
 	}
 
-	pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cs);
+	if (int err = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cs))
+	{
+		sig_log.error("Failed to set thread affinity 0x%x: error %d.", mask, err);
+	}
+#endif
+}
+
+u64 thread_ctrl::get_thread_affinity_mask()
+{
+#ifdef _WIN32
+	const u64 res = get_process_affinity_mask();
+
+	if (DWORD_PTR result = SetThreadAffinityMask(GetCurrentThread(), res))
+	{
+		if (res != result)
+		{
+			SetThreadAffinityMask(GetCurrentThread(), result);
+		}
+
+		return result;
+	}
+
+	sig_log.error("Failed to get thread affinity mask.");
+	return 0;
+#elif defined(__linux__) || defined(__DragonFly__) || defined(__FreeBSD__)
+	cpu_set_t cs;
+	CPU_ZERO(&cs);
+
+	if (int err = pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &cs))
+	{
+		sig_log.error("Failed to get thread affinity mask: error %d.", err);
+		return 0;
+	}
+
+	u64 result = 0;
+
+	for (u32 core = 0; core < 64u; core++)
+	{
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wold-style-cast"
+		if (CPU_ISSET(core, &cs))
+#pragma GCC diagnostic pop
+		{
+			result |= 1ull << core;
+		}
+	}
+
+	if (result == 0)
+	{
+		sig_log.error("Thread affinity mask is out of u64 range.");
+		return 0;
+	}
+
+	return result;
+#else
+	return -1;
 #endif
 }

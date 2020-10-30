@@ -17,12 +17,16 @@
 #include <string_view>
 
 // attr_protocol (waiting scheduling policy)
-enum
+enum lv2_protocol : u32
 {
 	SYS_SYNC_FIFO                = 0x1, // First In, First Out Order
 	SYS_SYNC_PRIORITY            = 0x2, // Priority Order
 	SYS_SYNC_PRIORITY_INHERIT    = 0x3, // Basic Priority Inheritance Protocol
 	SYS_SYNC_RETRY               = 0x4, // Not selected while unlocking
+};
+
+enum : u32
+{
 	SYS_SYNC_ATTR_PROTOCOL_MASK  = 0xf,
 };
 
@@ -66,6 +70,7 @@ struct lv2_obj
 
 	static const u32 id_step = 0x100;
 	static const u32 id_count = 8192;
+	static constexpr std::pair<u32, u32> id_invl_range = {0, 8};
 
 private:
 	enum thread_cmd : s32
@@ -74,34 +79,40 @@ private:
 		enqueue_cmd,
 	};
 
+	// Function executed under IDM mutex, error will make the object creation fail and the error will be returned
+	CellError on_id_create()
+	{
+		return {};
+	}
+
 public:
 
-	static std::string_view name64(const u64& name_u64)
+	static std::string name64(u64 name_u64)
 	{
-		std::string_view str{reinterpret_cast<const char*>(&name_u64), 7};
+		const auto ptr = reinterpret_cast<const char*>(&name_u64);
 
-		if (const auto pos = str.find_first_of('\0'); pos != umax)
-		{
-			str.remove_suffix(str.size() - pos);
-		}
+		// NTS string, ignore invalid/newline characters
+		// Example: "lv2\n\0tx" will be printed as "lv2"
+		std::string str{ptr, std::find(ptr, ptr + 7, '\0')};
+		str.erase(std::remove_if(str.begin(), str.end(), [](uchar c){ return !std::isprint(c); }), str.end());
 
 		return str;
 	};
 
 	// Find and remove the object from the container (deque or vector)
 	template <typename T, typename E>
-	static bool unqueue(std::deque<T*>& queue, const E& object)
+	static T* unqueue(std::deque<T*>& queue, E* object)
 	{
 		for (auto found = queue.cbegin(), end = queue.cend(); found != end; found++)
 		{
 			if (*found == object)
 			{
 				queue.erase(found);
-				return true;
+				return static_cast<T*>(object);
 			}
 		}
 
-		return false;
+		return nullptr;
 	}
 
 	template <typename E, typename T>
@@ -155,6 +166,7 @@ public:
 
 	static inline bool awake(cpu_thread* const thread, s32 prio = enqueue_cmd)
 	{
+		vm::temporary_unlock();
 		std::lock_guard lock(g_mutex);
 		return awake_unlocked(thread, prio);
 	}
@@ -204,23 +216,45 @@ public:
 			{
 				std::shared_ptr<T> result = make();
 
-				if (!ipc_manager<T, u64>::add(ipc_key, [&] { if (!idm::import_existing<lv2_obj, T>(result)) result.reset(); return result; }, &result))
+				CellError error{};
+
+				if (!ipc_manager<T, u64>::add(ipc_key, [&]()
 				{
+					if (!idm::import<lv2_obj, T>([&]()
+					{
+						if (result && (error = result->on_id_create()))
+							result.reset();
+						return result;
+					}))
+					{
+						result.reset();
+					}
+
+					return result;
+				}, &result))
+				{
+					if (error)
+					{
+						return error;
+					}
+
 					if (flags == SYS_SYNC_NEWLY_CREATED)
 					{
 						return CELL_EEXIST;
 					}
 
-					if (!idm::import_existing<lv2_obj, T>(result))
+					error = CELL_EAGAIN;
+
+					if (!idm::import<lv2_obj, T>([&]() { if (result && (error = result->on_id_create())) result.reset(); return std::move(result); }))
 					{
-						return CELL_EAGAIN;
+						return error;
 					}
 
 					return CELL_OK;
 				}
 				else if (!result)
 				{
-					return CELL_EAGAIN;
+					return error ? CELL_EAGAIN : error;
 				}
 				else
 				{
@@ -236,9 +270,11 @@ public:
 					return CELL_ESRCH;
 				}
 
-				if (!idm::import_existing<lv2_obj, T>(result))
+				CellError error = CELL_EAGAIN;
+
+				if (!idm::import<lv2_obj, T>([&]() { if (result && (error = result->on_id_create())) result.reset(); return std::move(result); }))
 				{
-					return CELL_EAGAIN;
+					return error;
 				}
 
 				return CELL_OK;
@@ -251,9 +287,13 @@ public:
 		}
 		case SYS_SYNC_NOT_PROCESS_SHARED:
 		{
-			if (!idm::import<lv2_obj, T>(std::forward<F>(make)))
+			std::shared_ptr<T> result = make();
+
+			CellError error = CELL_EAGAIN;
+
+			if (!idm::import<lv2_obj, T>([&]() { if (result && (error = result->on_id_create())) result.reset(); return std::move(result); }))
 			{
-				return CELL_EAGAIN;
+				return error;
 			}
 
 			return CELL_OK;

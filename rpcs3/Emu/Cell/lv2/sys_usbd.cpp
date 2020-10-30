@@ -168,11 +168,15 @@ usb_handler_thread::usb_handler_thread()
 		}
 
 		check_device(0x0E6F, 0x0241, 0x0241, "Lego Dimensions Portal");
+		check_device(0x0E6F, 0x0129, 0x0129, "Disney Infinity Portal");
 
 		check_device(0x1415, 0x0000, 0x0000, "Singstar Microphone");
 		check_device(0x12BA, 0x0100, 0x0100, "Guitar Hero Guitar");
 		check_device(0x12BA, 0x0120, 0x0120, "Guitar Hero Drums");
-		found_ghltar = check_device(0x12BA, 0x074B, 0x074B, "Guitar Hero Live Guitar");
+		if (check_device(0x12BA, 0x074B, 0x074B, "Guitar Hero Live Guitar"))
+		{
+			found_ghltar = true;
+		}
 
 		check_device(0x12BA, 0x0140, 0x0140, "DJ Hero Turntable");
 		check_device(0x12BA, 0x0200, 0x020F, "Harmonix Guitar");
@@ -194,6 +198,9 @@ usb_handler_thread::usb_handler_thread()
 		check_device(0x054C, 0x0001, 0x0041, "buzzer1");
 		check_device(0x054C, 0x0042, 0x0042, "buzzer2");
 		check_device(0x046D, 0xC220, 0xC220, "buzzer9");
+
+		// GCon3 Gun
+		check_device(0x0B9A, 0x0800, 0x0800, "guncon3");
 	}
 
 	libusb_free_device_list(list, 1);
@@ -252,23 +259,26 @@ void usb_handler_thread::operator()()
 
 			u64 timestamp = get_system_time() - Emu.GetPauseTime();
 
-			for (auto it = fake_transfers.begin(); it != fake_transfers.end(); it++)
+			for (auto it = fake_transfers.begin(); it != fake_transfers.end();)
 			{
 				auto transfer = *it;
 
 				ASSERT(transfer->busy && transfer->fake);
 
 				if (transfer->expected_time > timestamp)
+				{
+					++it;
 					continue;
+				}
+
 
 				transfer->result = transfer->expected_result;
 				transfer->count  = transfer->expected_count;
 				transfer->fake   = false;
 				transfer->busy   = false;
 
-				fake_transfers.erase(it--);
-
 				send_message(SYS_USBD_TRANSFER_COMPLETE, transfer->transfer_id);
+				it = fake_transfers.erase(it); // if we've processed this, then we erase this entry (replacing the iterator with the new reference)
 			}
 		}
 
@@ -386,14 +396,13 @@ void usb_handler_thread::check_devices_vs_ldds()
 					continue;
 				}
 
-				sys_usbd.success("Ldd device matchup for <%s>", ldd.name);
-
 				dev->read_descriptors();
+				dev->assigned_number = dev_counter++; // assign current dev_counter, and atomically increment
 
-				dev->assigned_number = dev_counter;
-				handled_devices.emplace(dev_counter, std::pair(UsbInternalDevice{0x00, dev_counter, 0x02, 0x40}, dev));
-				send_message(SYS_USBD_ATTACH, dev_counter);
-				dev_counter++;
+				sys_usbd.success("Ldd device matchup for <%s>, assigned as handled_device=0x%x", ldd.name, dev->assigned_number);
+
+				handled_devices.emplace(dev->assigned_number, std::pair(UsbInternalDevice{0x00, narrow<u8>(dev->assigned_number), 0x02, 0x40}, dev));
+				send_message(SYS_USBD_ATTACH, dev->assigned_number);
 			}
 		}
 	}
@@ -476,7 +485,7 @@ error_code sys_usbd_finalize(ppu_thread& ppu, u32 handle)
 	usbh->is_init = false;
 
 	// Forcefully awake all waiters
-	for (auto& cpu : decltype(usbh->sq)(std::move(usbh->sq)))
+	for (auto& cpu : ::as_rvalue(std::move(usbh->sq)))
 	{
 		// Special ternimation signal value
 		cpu->gpr[4] = 4;
@@ -565,7 +574,19 @@ error_code sys_usbd_get_descriptor(u32 handle, u32 device_handle, vm::ptr<void> 
 // This function is used for psp(cellUsbPspcm), dongles in ps3 arcade cabinets(PS3A-USJ), ps2 cam(eyetoy), generic usb camera?(sample_usb2cam)
 error_code sys_usbd_register_ldd(u32 handle, vm::ptr<char> s_product, u16 slen_product)
 {
-	sys_usbd.todo("sys_usbd_register_ldd(handle=0x%x, s_product=%s, slen_product=0x%x)", handle, s_product, slen_product);
+	// slightly hacky way of getting Namco GCon3 gun to work.
+	// The register_ldd appears to be a more promiscuous mode function, where all device 'inserts' would be presented to the cellUsbd for Probing.
+	// Unsure how many more devices might need similar treatment (i.e. just a compare and force VID/PID add), or if it's worth adding a full promiscuous
+	// capability
+	if (strcmp(s_product.get_ptr(), "guncon3") == 0)
+	{
+		sys_usbd.warning("sys_usbd_register_ldd(handle=0x%x, s_product=%s, slen_product=0x%x) -> Redirecting to sys_usbd_register_extra_ldd", handle, s_product, slen_product);
+		sys_usbd_register_extra_ldd(handle, s_product, slen_product, 0x0B9A, 0x0800, 0x0800);
+	}
+	else
+	{
+		sys_usbd.todo("sys_usbd_register_ldd(handle=0x%x, s_product=%s, slen_product=0x%x)", handle, s_product, slen_product);
+	}
 	return CELL_OK;
 }
 

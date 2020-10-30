@@ -25,9 +25,8 @@
 
 LOG_CHANNEL(ppu_loader);
 
-extern void ppu_initialize_syscalls();
-extern std::string ppu_get_function_name(const std::string& module, u32 fnid);
-extern std::string ppu_get_variable_name(const std::string& module, u32 vnid);
+extern std::string ppu_get_function_name(const std::string& _module, u32 fnid);
+extern std::string ppu_get_variable_name(const std::string& _module, u32 vnid);
 extern void ppu_register_range(u32 addr, u32 size);
 extern void ppu_register_function_at(u32 addr, u32 size, ppu_function_t ptr);
 extern void ppu_initialize(const ppu_module& info);
@@ -61,37 +60,30 @@ ppu_static_module::ppu_static_module(const char* name)
 	ppu_module_manager::register_module(this);
 }
 
-std::unordered_map<std::string, ppu_static_module*>& ppu_module_manager::access()
+void ppu_module_manager::register_module(ppu_static_module* _module)
 {
-	static std::unordered_map<std::string, ppu_static_module*> map;
-
-	return map;
+	ppu_module_manager::s_module_map.emplace(_module->name, _module);
 }
 
-void ppu_module_manager::register_module(ppu_static_module* module)
+ppu_static_function& ppu_module_manager::access_static_function(const char* _module, u32 fnid)
 {
-	access().emplace(module->name, module);
-}
-
-ppu_static_function& ppu_module_manager::access_static_function(const char* module, u32 fnid)
-{
-	auto& res = access().at(module)->functions[fnid];
+	auto& res = ppu_module_manager::s_module_map.at(_module)->functions[fnid];
 
 	if (res.name)
 	{
-		fmt::throw_exception("PPU FNID duplication in module %s (%s, 0x%x)", module, res.name, fnid);
+		fmt::throw_exception("PPU FNID duplication in module %s (%s, 0x%x)", _module, res.name, fnid);
 	}
 
 	return res;
 }
 
-ppu_static_variable& ppu_module_manager::access_static_variable(const char* module, u32 vnid)
+ppu_static_variable& ppu_module_manager::access_static_variable(const char* _module, u32 vnid)
 {
-	auto& res = access().at(module)->variables[vnid];
+	auto& res = ppu_module_manager::s_module_map.at(_module)->variables[vnid];
 
 	if (res.name)
 	{
-		fmt::throw_exception("PPU VNID duplication in module %s (%s, 0x%x)", module, res.name, vnid);
+		fmt::throw_exception("PPU VNID duplication in module %s (%s, 0x%x)", _module, res.name, vnid);
 	}
 
 	return res;
@@ -99,7 +91,7 @@ ppu_static_variable& ppu_module_manager::access_static_variable(const char* modu
 
 const ppu_static_module* ppu_module_manager::get_module(const std::string& name)
 {
-	const auto& map = access();
+	const auto& map = ppu_module_manager::s_module_map;
 	const auto found = map.find(name);
 	return found != map.end() ? found->second : nullptr;
 }
@@ -107,7 +99,7 @@ const ppu_static_module* ppu_module_manager::get_module(const std::string& name)
 // Global linkage information
 struct ppu_linkage_info
 {
-	struct module
+	struct module_data
 	{
 		struct info
 		{
@@ -127,7 +119,7 @@ struct ppu_linkage_info
 	};
 
 	// Module map
-	std::unordered_map<std::string, module> modules;
+	std::unordered_map<std::string, module_data> modules;
 };
 
 // Initialize static modules.
@@ -137,8 +129,6 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 	{
 		return;
 	}
-
-	ppu_initialize_syscalls();
 
 	const std::initializer_list<const ppu_static_module*> registered
 	{
@@ -289,23 +279,23 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 	u32 alloc_addr = 0;
 
 	// "Use" all the modules for correct linkage
-	for (auto& module : registered)
+	for (auto& _module : registered)
 	{
-		ppu_loader.trace("Registered static module: %s", module->name);
+		ppu_loader.trace("Registered static module: %s", _module->name);
 	}
 
 	for (auto& pair : ppu_module_manager::get())
 	{
-		const auto module = pair.second;
-		auto& linkage = link->modules[module->name];
+		const auto _module = pair.second;
+		auto& linkage = link->modules[_module->name];
 
-		for (auto& function : module->functions)
+		for (auto& function : _module->functions)
 		{
 			ppu_loader.trace("** 0x%08X: %s", function.first, function.second.name);
 
 			if (is_first)
 			{
-				g_ppu_function_names[function.second.index] = fmt::format("%s.%s", module->name, function.second.name);
+				g_ppu_function_names[function.second.index] = fmt::format("%s.%s", _module->name, function.second.name);
 			}
 
 			if ((function.second.flags & MFF_HIDDEN) == 0)
@@ -318,7 +308,7 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 			}
 		}
 
-		for (auto& variable : module->variables)
+		for (auto& variable : _module->variables)
 		{
 			ppu_loader.trace("** &0x%08X: %s (size=0x%x, align=0x%x)", variable.first, variable.second.name, variable.second.size, variable.second.align);
 
@@ -350,7 +340,7 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 				variable.second.var->set(variable.second.addr);
 			}
 
-			ppu_loader.trace("Allocated HLE variable %s.%s at 0x%x", module->name, variable.second.name, variable.second.var->addr());
+			ppu_loader.trace("Allocated HLE variable %s.%s at 0x%x", _module->name, variable.second.name, variable.second.var->addr());
 
 			// Initialize HLE variable
 			if (variable.second.init)
@@ -537,6 +527,9 @@ static auto ppu_load_exports(ppu_linkage_info* link, u32 exports_start, u32 expo
 					const u32 _entry = vm::read32(faddr);
 					const u32 target = ppu_function_manager::addr + 8 * _sf->index;
 
+					// Set exported function
+					flink.export_addr = target;
+
 					if ((target <= _entry && _entry - target <= 0x2000000) || (target > _entry && target - _entry < 0x2000000))
 					{
 						// Use relative branch
@@ -701,6 +694,96 @@ static auto ppu_load_imports(std::vector<ppu_reloc>& relocs, ppu_linkage_info* l
 	return result;
 }
 
+static void ppu_check_patch_spu_images(const ppu_segment& seg)
+{
+	const std::string_view seg_view{vm::get_super_ptr<char>(seg.addr), seg.size};
+
+	for (std::size_t i = seg_view.find("\177ELF"); i < seg.size; i = seg_view.find("\177ELF", i + 4))
+	{
+		const auto elf_header = vm::get_super_ptr<u8>(seg.addr + i);
+
+		// Try to load SPU image
+		const spu_exec_object obj(fs::file(elf_header, seg.size - i));
+
+		if (obj != elf_error::ok)
+		{
+			// This address does not have an SPU elf
+			continue;
+		}
+
+		// Segment info dump
+		std::string name;
+		std::string dump;
+
+		std::size_t applied = 0;
+
+		// Executable hash
+		sha1_context sha2;
+		sha1_starts(&sha2);
+		u8 sha1_hash[20];
+
+		for (const auto& prog : obj.progs)
+		{
+			// Only hash the data, we are not loading it
+			sha1_update(&sha2, reinterpret_cast<const uchar*>(&prog.p_vaddr), sizeof(prog.p_vaddr));
+			sha1_update(&sha2, reinterpret_cast<const uchar*>(&prog.p_memsz), sizeof(prog.p_memsz));
+			sha1_update(&sha2, reinterpret_cast<const uchar*>(&prog.p_filesz), sizeof(prog.p_filesz));
+
+			fmt::append(dump, "\n\tSegment: p_type=0x%x, p_vaddr=0x%llx, p_filesz=0x%llx, p_memsz=0x%llx, p_offset=0x%llx", prog.p_type, prog.p_vaddr, prog.p_filesz, prog.p_memsz, prog.p_offset);
+
+			if (prog.p_type == 0x1u /* LOAD */ && prog.p_filesz > 0u)
+			{
+				sha1_update(&sha2, (elf_header + prog.p_offset), prog.p_filesz);
+			}
+
+			else if (prog.p_type == 0x4u /* NOTE */ && prog.p_filesz > 0u)
+			{
+				sha1_update(&sha2, (elf_header + prog.p_offset), prog.p_filesz);
+
+				// We assume that the string SPUNAME exists 0x14 bytes into the NOTE segment
+				name = reinterpret_cast<char*>(elf_header + prog.p_offset + 0x14);
+
+				if (!name.empty())
+				{
+					fmt::append(dump, "\n\tSPUNAME: '%s'", name);
+				}	
+			}
+		}
+
+		sha1_finish(&sha2, sha1_hash);
+
+		// Format patch name
+		std::string hash("SPU-0000000000000000000000000000000000000000");
+		for (u32 i = 0; i < sizeof(sha1_hash); i++)
+		{
+			constexpr auto pal = "0123456789abcdef";
+			hash[4 + i * 2] = pal[sha1_hash[i] >> 4];
+			hash[5 + i * 2] = pal[sha1_hash[i] & 15];
+		}
+
+		if (g_cfg.core.spu_debug)
+		{
+			fs::file dump_file(fs::get_cache_dir() + "/spu_progs/" + vfs::escape(name.substr(name.find_last_of('/') + 1)) + '_' + hash.substr(4) + ".elf", fs::rewrite);
+			obj.save(dump_file);
+		}
+
+		// Try to patch each segment, will only succeed if the address exists in SPU local storage
+		for (const auto& prog : obj.progs)
+		{
+			// Apply the patch
+			applied += g_fxo->get<patch_engine>()->apply_with_ls_check(hash, (elf_header + prog.p_offset), prog.p_filesz, prog.p_vaddr);
+
+			if (!Emu.GetTitleID().empty())
+			{
+				// Alternative patch
+				applied += g_fxo->get<patch_engine>()->apply_with_ls_check(Emu.GetTitleID() + '-' + hash, (elf_header + prog.p_offset), prog.p_filesz, prog.p_vaddr);
+			}
+		}
+
+		ppu_loader.success("SPU executable hash: %s (<- %u)%s", hash, applied, dump);
+	}
+}
+
 std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, const std::string& path)
 {
 	// Create new PRX object
@@ -744,7 +827,7 @@ std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, const std::stri
 
 				// Copy segment data
 				std::memcpy(vm::base(addr), prog.bin.data(), file_size);
-				ppu_loader.warning("**** Loaded to 0x%x (size=0x%x)", addr, mem_size);
+				ppu_loader.warning("**** Loaded to 0x%x...0x%x (size=0x%x)", addr, addr + mem_size - 1, mem_size);
 
 				// Hash segment
 				sha1_update(&sha, reinterpret_cast<const uchar*>(&prog.p_vaddr), sizeof(prog.p_vaddr));
@@ -973,7 +1056,13 @@ std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, const std::stri
 		applied += g_fxo->get<patch_engine>()->apply(Emu.GetTitleID() + '-' + hash, vm::g_base_addr);
 	}
 
-	ppu_loader.notice("PRX library hash: %s (<- %u)", hash, applied);
+	// Embedded SPU elf patching
+	for (const auto& seg : prx->segs)
+	{
+		ppu_check_patch_spu_images(seg);
+	}
+
+	ppu_loader.success("PRX library hash: %s (<- %u)", hash, applied);
 
 	if (Emu.IsReady() && g_fxo->get<ppu_module>()->segs.empty())
 	{
@@ -996,14 +1085,14 @@ void ppu_unload_prx(const lv2_prx& prx)
 	// Clean linkage info
 	for (auto& imp : prx.imports)
 	{
-		auto pinfo = static_cast<ppu_linkage_info::module::info*>(imp.second);
+		auto pinfo = static_cast<ppu_linkage_info::module_data::info*>(imp.second);
 		pinfo->frefss.erase(imp.first);
 		pinfo->imports.erase(imp.first);
 	}
 
 	//for (auto& exp : prx.exports)
 	//{
-	//	auto pinfo = static_cast<ppu_linkage_info::module::info*>(exp.second);
+	//	auto pinfo = static_cast<ppu_linkage_info::module_data::info*>(exp.second);
 	//	if (pinfo->static_func)
 	//	{
 	//		pinfo->export_addr = ppu_function_manager::addr + 8 * pinfo->static_func->index;
@@ -1134,83 +1223,15 @@ void ppu_load_exec(const ppu_exec_object& elf)
 		applied += g_fxo->get<patch_engine>()->apply(Emu.GetTitleID() + '-' + hash, vm::g_base_addr);
 	}
 
-	ppu_loader.notice("PPU executable hash: %s (<- %u)", hash, applied);
+	ppu_loader.success("PPU executable hash: %s (<- %u)", hash, applied);
 
 	// Initialize HLE modules
 	ppu_initialize_modules(link);
 
 	// Embedded SPU elf patching
-	for (u32 i = _main->segs[0].addr; i < (_main->segs[0].addr + _main->segs[0].size); i += 128)
+	for (const auto& seg : _main->segs)
 	{
-		uchar* elf_header = vm::_ptr<u8>(i);
-		const spu_exec_object obj(fs::file(vm::base(vm::cast(i, HERE)), (_main->segs[0].addr + _main->segs[0].size) - i));
-
-		if (obj != elf_error::ok)
-		{
-			// This address does not have an SPU elf
-			continue;
-		}
-
-		// Segment info dump
-		std::string dump;
-
-		applied = 0;
-
-		// Executable hash
-		sha1_context sha2;
-		sha1_starts(&sha2);
-		u8 sha1_hash[20];
-
-		for (const auto& prog : obj.progs)
-		{
-			// Only hash the data, we are not loading it
-			sha1_update(&sha2, reinterpret_cast<const uchar*>(&prog.p_vaddr), sizeof(prog.p_vaddr));
-			sha1_update(&sha2, reinterpret_cast<const uchar*>(&prog.p_memsz), sizeof(prog.p_memsz));
-			sha1_update(&sha2, reinterpret_cast<const uchar*>(&prog.p_filesz), sizeof(prog.p_filesz));
-
-			fmt::append(dump, "\n\tSegment: p_type=0x%x, p_vaddr=0x%llx, p_filesz=0x%llx, p_memsz=0x%llx, p_offset=0x%llx", prog.p_type, prog.p_vaddr, prog.p_filesz, prog.p_memsz, prog.p_offset);
-
-			if (prog.p_type == 0x1u /* LOAD */ && prog.p_filesz > 0u)
-			{
-				sha1_update(&sha2, (elf_header + prog.p_offset), prog.p_filesz);
-			}
-
-			else if (prog.p_type == 0x4u /* NOTE */ && prog.p_filesz > 0u)
-			{
-				sha1_update(&sha2, (elf_header + prog.p_offset), prog.p_filesz);
-
-				// We assume that the string SPUNAME exists 0x14 bytes into the NOTE segment
-				const auto spu_name = reinterpret_cast<const char*>(elf_header + prog.p_offset + 0x14);
-				fmt::append(dump, "\n\tSPUNAME: '%s'", spu_name);
-			}
-		}
-
-		sha1_finish(&sha2, sha1_hash);
-
-		// Format patch name
-		std::string hash("SPU-0000000000000000000000000000000000000000");
-		for (u32 i = 0; i < sizeof(sha1_hash); i++)
-		{
-			constexpr auto pal = "0123456789abcdef";
-			hash[4 + i * 2] = pal[sha1_hash[i] >> 4];
-			hash[5 + i * 2] = pal[sha1_hash[i] & 15];
-		}
-
-		// Try to patch each segment, will only succeed if the address exists in SPU local storage
-		for (const auto& prog : obj.progs)
-		{
-			// Apply the patch
-			applied += g_fxo->get<patch_engine>()->apply_with_ls_check(hash, (elf_header + prog.p_offset), prog.p_filesz, prog.p_vaddr);
-
-			if (!Emu.GetTitleID().empty())
-			{
-				// Alternative patch
-				applied += g_fxo->get<patch_engine>()->apply_with_ls_check(Emu.GetTitleID() + '-' + hash, (elf_header + prog.p_offset), prog.p_filesz, prog.p_vaddr);
-			}
-		}
-
-		ppu_loader.notice("SPU executable hash: %s (<- %u)%s", hash, applied, dump);
-
+		ppu_check_patch_spu_images(seg);
 	}
 
 	// Static HLE patching
@@ -1261,6 +1282,8 @@ void ppu_load_exec(const ppu_exec_object& elf)
 			tls_vaddr = vm::cast(prog.p_vaddr, HERE);
 			tls_fsize = ::narrow<u32>(prog.p_filesz, "p_filesz" HERE);
 			tls_vsize = ::narrow<u32>(prog.p_memsz, "p_memsz" HERE);
+
+			ppu_loader.notice("TLS info segment found: tls-image=*0x%x, image-size=0x%x, tls-size=0x%x", tls_vaddr, tls_fsize, tls_vsize);
 			break;
 		}
 
@@ -1516,7 +1539,7 @@ void ppu_load_exec(const ppu_exec_object& elf)
 	p.stack_addr = vm::cast(vm::alloc(primary_stacksize, vm::stack, 4096));
 	p.stack_size = primary_stacksize;
 
-	auto ppu = idm::make_ptr<named_thread<ppu_thread>>("PPU[0x1000000] Thread (main_thread)", p, "main_thread", primary_prio, 1);
+	auto ppu = idm::make_ptr<named_thread<ppu_thread>>("PPU[0x1000000] main_thread ", p, "main_thread", primary_prio, 1);
 
 	// Write initial data (exitspawn)
 	if (!Emu.data.empty())
@@ -1704,7 +1727,13 @@ std::shared_ptr<lv2_overlay> ppu_load_overlay(const ppu_exec_object& elf, const 
 		applied += g_fxo->get<patch_engine>()->apply(Emu.GetTitleID() + '-' + hash, vm::g_base_addr);
 	}
 
-	ppu_loader.notice("OVL executable hash: %s (<- %u)", hash, applied);
+	// Embedded SPU elf patching
+	for (const auto& seg : ovlm->segs)
+	{
+		ppu_check_patch_spu_images(seg);
+	}
+
+	ppu_loader.success("OVL executable hash: %s (<- %u)", hash, applied);
 
 	// Load other programs
 	for (auto& prog : elf.progs)

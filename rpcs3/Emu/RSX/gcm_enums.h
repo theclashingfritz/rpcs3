@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Utilities/types.h"
 
 namespace rsx
@@ -53,14 +53,56 @@ namespace rsx
 
 	enum class surface_depth_format : u8
 	{
-		z16, // unsigned 16 bits depth
-		z24s8, // unsigned 24 bits depth + 8 bits stencil
+		z16,   // typeless 16 bits depth
+		z24s8, // typeless 24 bits depth + 8 bits stencil
+	};
+
+	enum class surface_depth_format2 : u8
+	{
+		z16_uint,    // unsigned 16 bits depth
+		z24s8_uint,  // unsigned 24 bits depth + 8 bits stencil
+		z16_float,   // floating point 16 bits depth
+		z24s8_float, // floating point 24 bits depth + 8 bits stencil
 	};
 
 	surface_depth_format to_surface_depth_format(u8 in);
 
+	constexpr
+	bool operator == (surface_depth_format2 rhs, surface_depth_format lhs)
+	{
+		switch (lhs)
+		{
+		case surface_depth_format::z16:
+			return (rhs == surface_depth_format2::z16_uint || rhs == surface_depth_format2::z16_float);
+		case surface_depth_format::z24s8:
+			return (rhs == surface_depth_format2::z24s8_uint || rhs == surface_depth_format2::z24s8_float);
+		default:
+			ASSUME(0);
+		}
+	}
+
+	// GCC requires every operator declared explicitly
+	constexpr
+	bool operator == (surface_depth_format rhs, surface_depth_format2 lhs)
+	{
+		return lhs == rhs;
+	}
+
+	constexpr
+	bool operator != (surface_depth_format2 rhs, surface_depth_format lhs)
+	{
+		return !(rhs == lhs);
+	}
+
+	constexpr
+	bool operator != (surface_depth_format rhs, surface_depth_format2 lhs)
+	{
+		return !(lhs == rhs);
+	}
+
 	enum class surface_raster_type : u8
 	{
+		undefined = 0,
 		linear = 1,
 		swizzle = 2,
 	};
@@ -527,6 +569,24 @@ enum
 	CELL_GCM_FUNC_REVERSE_SUBTRACT_SIGNED = 0x0000F005,
 	CELL_GCM_FUNC_ADD_SIGNED = 0x0000F006,
 	CELL_GCM_FUNC_REVERSE_ADD_SIGNED = 0x0000F007,
+};
+
+// GCM blend factor
+enum
+{
+	CELL_GCM_SRC_COLOR = 0x0300,
+	CELL_GCM_ONE_MINUS_SRC_COLOR = 0x0301,
+	CELL_GCM_SRC_ALPHA = 0x0302,
+	CELL_GCM_ONE_MINUS_SRC_ALPHA = 0x0303,
+	CELL_GCM_DST_ALPHA = 0x0304,
+	CELL_GCM_ONE_MINUS_DST_ALPHA = 0x0305,
+	CELL_GCM_DST_COLOR = 0x0306,
+	CELL_GCM_ONE_MINUS_DST_COLOR = 0x0307,
+	CELL_GCM_SRC_ALPHA_SATURATE = 0x0308,
+	CELL_GCM_CONSTANT_COLOR = 0x8001,
+	CELL_GCM_ONE_MINUS_CONSTANT_COLOR = 0x8002,
+	CELL_GCM_CONSTANT_ALPHA = 0x8003,
+	CELL_GCM_ONE_MINUS_CONSTANT_ALPHA = 0x8004,
 };
 
 enum
